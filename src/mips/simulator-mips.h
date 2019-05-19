@@ -12,14 +12,16 @@
 #ifndef V8_MIPS_SIMULATOR_MIPS_H_
 #define V8_MIPS_SIMULATOR_MIPS_H_
 
-#include "src/allocation.h"
-#include "src/mips/constants-mips.h"
+// globals.h defines USE_SIMULATOR.
+#include "src/globals.h"
 
 #if defined(USE_SIMULATOR)
 // Running with a simulator.
 
+#include "src/allocation.h"
 #include "src/assembler.h"
 #include "src/base/hashmap.h"
+#include "src/mips/constants-mips.h"
 #include "src/simulator-base.h"
 
 namespace v8 {
@@ -226,9 +228,7 @@ class Simulator : public SimulatorBase {
   void set_pc(int32_t value);
   int32_t get_pc() const;
 
-  Address get_sp() const {
-    return reinterpret_cast<Address>(static_cast<intptr_t>(get_register(sp)));
-  }
+  Address get_sp() const { return static_cast<Address>(get_register(sp)); }
 
   // Accessor to the internal simulator stack area.
   uintptr_t StackLimit(uintptr_t c_limit) const;
@@ -237,12 +237,12 @@ class Simulator : public SimulatorBase {
   void Execute();
 
   template <typename Return, typename... Args>
-  Return Call(byte* entry, Args... args) {
+  Return Call(Address entry, Args... args) {
     return VariadicCall<Return>(this, &Simulator::CallImpl, entry, args...);
   }
 
   // Alternative: call a 2-argument double function.
-  double CallFP(byte* entry, double d0, double d1);
+  double CallFP(Address entry, double d0, double d1);
 
   // Push an address onto the JS stack.
   uintptr_t PushAddress(uintptr_t address);
@@ -280,7 +280,7 @@ class Simulator : public SimulatorBase {
     Unpredictable = 0xbadbeaf
   };
 
-  V8_EXPORT_PRIVATE intptr_t CallImpl(byte* entry, int argument_count,
+  V8_EXPORT_PRIVATE intptr_t CallImpl(Address entry, int argument_count,
                                       const intptr_t* arguments);
 
   // Unsupported instructions use Format to print an error and stop execution.
@@ -316,6 +316,8 @@ class Simulator : public SimulatorBase {
 
   inline int ReadW(int32_t addr, Instruction* instr, TraceType t = WORD);
   inline void WriteW(int32_t addr, int value, Instruction* instr);
+  void WriteConditionalW(int32_t addr, int32_t value, Instruction* instr,
+                         int32_t rt_reg);
 
   inline double ReadD(int32_t addr, Instruction* instr);
   inline void WriteD(int32_t addr, double value, Instruction* instr);
@@ -449,7 +451,7 @@ class Simulator : public SimulatorBase {
   // Compact branch guard.
   void CheckForbiddenSlot(int32_t current_pc) {
     Instruction* instr_after_compact_branch =
-        reinterpret_cast<Instruction*>(current_pc + Instruction::kInstrSize);
+        reinterpret_cast<Instruction*>(current_pc + kInstrSize);
     if (instr_after_compact_branch->IsForbiddenAfterBranch()) {
       FATAL(
           "Error: Unexpected instruction 0x%08x immediately after a "
@@ -511,7 +513,7 @@ class Simulator : public SimulatorBase {
   void GetFpArgs(double* x, double* y, int32_t* z);
   void SetFpResult(const double& result);
 
-  void CallInternal(byte* entry);
+  void CallInternal(Address entry);
 
   // Architecture state.
   // Registers.
@@ -556,6 +558,97 @@ class Simulator : public SimulatorBase {
     char* desc;
   };
   StopCountAndDesc watched_stops_[kMaxStopCode + 1];
+
+  // Synchronization primitives.
+  enum class MonitorAccess {
+    Open,
+    RMW,
+  };
+
+  enum class TransactionSize {
+    None = 0,
+    Word = 4,
+  };
+
+  // The least-significant bits of the address are ignored. The number of bits
+  // is implementation-defined, between 3 and minimum page size.
+  static const uintptr_t kExclusiveTaggedAddrMask = ~((1 << 3) - 1);
+
+  class LocalMonitor {
+   public:
+    LocalMonitor();
+
+    // These functions manage the state machine for the local monitor, but do
+    // not actually perform loads and stores. NotifyStoreConditional only
+    // returns true if the store conditional is allowed; the global monitor will
+    // still have to be checked to see whether the memory should be updated.
+    void NotifyLoad();
+    void NotifyLoadLinked(uintptr_t addr, TransactionSize size);
+    void NotifyStore();
+    bool NotifyStoreConditional(uintptr_t addr, TransactionSize size);
+
+   private:
+    void Clear();
+
+    MonitorAccess access_state_;
+    uintptr_t tagged_addr_;
+    TransactionSize size_;
+  };
+
+  class GlobalMonitor {
+   public:
+    class LinkedAddress {
+     public:
+      LinkedAddress();
+
+     private:
+      friend class GlobalMonitor;
+      // These functions manage the state machine for the global monitor, but do
+      // not actually perform loads and stores.
+      void Clear_Locked();
+      void NotifyLoadLinked_Locked(uintptr_t addr);
+      void NotifyStore_Locked();
+      bool NotifyStoreConditional_Locked(uintptr_t addr,
+                                         bool is_requesting_thread);
+
+      MonitorAccess access_state_;
+      uintptr_t tagged_addr_;
+      LinkedAddress* next_;
+      LinkedAddress* prev_;
+      // A scd can fail due to background cache evictions. Rather than
+      // simulating this, we'll just occasionally introduce cases where an
+      // store conditional fails. This will happen once after every
+      // kMaxFailureCounter exclusive stores.
+      static const int kMaxFailureCounter = 5;
+      int failure_counter_;
+    };
+
+    // Exposed so it can be accessed by Simulator::{Read,Write}Ex*.
+    base::Mutex mutex;
+
+    void NotifyLoadLinked_Locked(uintptr_t addr, LinkedAddress* linked_address);
+    void NotifyStore_Locked(LinkedAddress* linked_address);
+    bool NotifyStoreConditional_Locked(uintptr_t addr,
+                                       LinkedAddress* linked_address);
+
+    // Called when the simulator is destroyed.
+    void RemoveLinkedAddress(LinkedAddress* linked_address);
+
+    static GlobalMonitor* Get();
+
+   private:
+    // Private constructor. Call {GlobalMonitor::Get()} to get the singleton.
+    GlobalMonitor() = default;
+    friend class base::LeakyObject<GlobalMonitor>;
+
+    bool IsProcessorInLinkedList_Locked(LinkedAddress* linked_address) const;
+    void PrependProcessor_Locked(LinkedAddress* linked_address);
+
+    LinkedAddress* head_ = nullptr;
+  };
+
+  LocalMonitor local_monitor_;
+  GlobalMonitor::LinkedAddress global_monitor_thread_;
 };
 
 }  // namespace internal

@@ -11,6 +11,7 @@
 
 #include "src/allocation.h"
 #include "src/base/compiler-specific.h"
+#include "src/base/optional.h"
 #include "src/base/platform/mutex.h"
 #include "src/flags.h"
 #include "src/ostreams.h"
@@ -19,6 +20,8 @@ namespace v8 {
 namespace internal {
 
 class Logger;
+template <typename T>
+class Vector;
 
 enum class LogSeparator { kSeparator };
 
@@ -32,7 +35,7 @@ class Log {
   static bool InitLogAtStart() {
     return FLAG_log || FLAG_log_api || FLAG_log_code || FLAG_log_handles ||
            FLAG_log_suspect || FLAG_ll_prof || FLAG_perf_basic_prof ||
-           FLAG_perf_prof || FLAG_log_source_code ||
+           FLAG_perf_prof || FLAG_log_source_code || FLAG_gdbjit ||
            FLAG_log_internal_timer_events || FLAG_prof_cpp || FLAG_trace_ic ||
            FLAG_log_function_events;
   }
@@ -50,40 +53,29 @@ class Log {
 
   // This mode is only used in tests, as temporary files are automatically
   // deleted on close and thus can't be accessed afterwards.
-  static const char* const kLogToTemporaryFile;
+  V8_EXPORT_PRIVATE static const char* const kLogToTemporaryFile;
   static const char* const kLogToConsole;
 
-  // Utility class for formatting log messages. It fills the message into the
-  // static buffer in Log.
-  class MessageBuilder BASE_EMBEDDED {
+  // Utility class for formatting log messages. It escapes the given messages
+  // and then appends them to the static buffer in Log.
+  class MessageBuilder {
    public:
     // Create a message builder starting from position 0.
     // This acquires the mutex in the log as well.
     explicit MessageBuilder(Log* log);
-    ~MessageBuilder() { }
+    ~MessageBuilder() = default;
 
-    // Append string data to the log message.
-    void PRINTF_FORMAT(2, 3) Append(const char* format, ...);
-
-    // Append string data to the log message.
-    void PRINTF_FORMAT(2, 0) AppendVA(const char* format, va_list args);
-
-    void AppendSymbolName(Symbol* symbol);
-
-    void AppendDetailed(String* str, bool show_impl_info);
-
-    // Append and escape a full string.
-    void AppendString(String* source);
-    void AppendString(const char* string);
-
-    // Append and escpae a portion of a string.
-    void AppendStringPart(String* source, int len);
-    void AppendStringPart(const char* str, size_t len);
-
-    void AppendCharacter(const char character);
+    void AppendString(String str,
+                      base::Optional<int> length_limit = base::nullopt);
+    void AppendString(Vector<const char> str);
+    void AppendString(const char* str);
+    void AppendString(const char* str, size_t length);
+    void PRINTF_FORMAT(2, 3) AppendFormatString(const char* format, ...);
+    void AppendCharacter(char c);
+    void AppendSymbolName(Symbol symbol);
 
     // Delegate insertion to the underlying {log_}.
-    // All appened srings are escaped to maintain one-line log entries.
+    // All appended strings are escaped to maintain one-line log entries.
     template <typename T>
     MessageBuilder& operator<<(T value) {
       log_->os_ << value;
@@ -94,8 +86,18 @@ class Log {
     void WriteToLogFile();
 
    private:
+    // Prints the format string into |log_->format_buffer_|. Returns the length
+    // of the result, or kMessageBufferSize if it was truncated.
+    int PRINTF_FORMAT(2, 0)
+        FormatStringIntoBuffer(const char* format, va_list args);
+
+    void AppendSymbolNameDetails(String str, bool show_impl_info);
+
+    void PRINTF_FORMAT(2, 3) AppendRawFormatString(const char* format, ...);
+    void AppendRawCharacter(const char character);
+
     Log* log_;
-    base::LockGuard<base::Mutex> lock_guard_;
+    base::MutexGuard lock_guard_;
   };
 
  private:
@@ -141,11 +143,11 @@ Log::MessageBuilder& Log::MessageBuilder::operator<<<const char*>(
 template <>
 Log::MessageBuilder& Log::MessageBuilder::operator<<<char>(char c);
 template <>
-Log::MessageBuilder& Log::MessageBuilder::operator<<<String*>(String* string);
+Log::MessageBuilder& Log::MessageBuilder::operator<<<String>(String string);
 template <>
-Log::MessageBuilder& Log::MessageBuilder::operator<<<Symbol*>(Symbol* symbol);
+Log::MessageBuilder& Log::MessageBuilder::operator<<<Symbol>(Symbol symbol);
 template <>
-Log::MessageBuilder& Log::MessageBuilder::operator<<<Name*>(Name* name);
+Log::MessageBuilder& Log::MessageBuilder::operator<<<Name>(Name name);
 
 }  // namespace internal
 }  // namespace v8

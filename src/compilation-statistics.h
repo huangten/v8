@@ -14,7 +14,7 @@
 namespace v8 {
 namespace internal {
 
-class CompilationInfo;
+class OptimizedCompilationInfo;
 class CompilationStatistics;
 
 struct AsPrintableStatistics {
@@ -24,7 +24,7 @@ struct AsPrintableStatistics {
 
 class CompilationStatistics final : public Malloced {
  public:
-  CompilationStatistics() {}
+  CompilationStatistics() = default;
 
   class BasicStats {
    public:

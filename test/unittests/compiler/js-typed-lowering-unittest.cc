@@ -29,8 +29,8 @@ namespace {
 
 const size_t kIndices[] = {0, 1, 42, 100, 1024};
 
-Type* const kJSTypes[] = {Type::Undefined(), Type::Null(),   Type::Boolean(),
-                          Type::Number(),    Type::String(), Type::Object()};
+Type const kJSTypes[] = {Type::Undefined(), Type::Null(),   Type::Boolean(),
+                         Type::Number(),    Type::String(), Type::Object()};
 
 }  // namespace
 
@@ -38,7 +38,7 @@ Type* const kJSTypes[] = {Type::Undefined(), Type::Null(),   Type::Boolean(),
 class JSTypedLoweringTest : public TypedGraphTest {
  public:
   JSTypedLoweringTest() : TypedGraphTest(3), javascript_(zone()) {}
-  ~JSTypedLoweringTest() override {}
+  ~JSTypedLoweringTest() override = default;
 
  protected:
   Reduction Reduce(Node* node) {
@@ -48,12 +48,13 @@ class JSTypedLoweringTest : public TypedGraphTest {
                     &machine);
     // TODO(titzer): mock the GraphReducer here for better unit testing.
     GraphReducer graph_reducer(zone(), graph());
-    JSTypedLowering reducer(&graph_reducer, &jsgraph, zone());
+    JSTypedLowering reducer(&graph_reducer, &jsgraph, broker(), zone());
     return reducer.Reduce(node);
   }
 
   Handle<JSArrayBuffer> NewArrayBuffer(void* bytes, size_t byte_length) {
-    Handle<JSArrayBuffer> buffer = factory()->NewJSArrayBuffer();
+    Handle<JSArrayBuffer> buffer =
+        factory()->NewJSArrayBuffer(SharedFlag::kNotShared);
     JSArrayBuffer::Setup(buffer, isolate(), true, bytes, byte_length);
     return buffer;
   }
@@ -175,7 +176,7 @@ TEST_F(JSTypedLoweringTest, JSStrictEqualWithTheHole) {
   Node* const context = UndefinedConstant();
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
-  TRACED_FOREACH(Type*, type, kJSTypes) {
+  TRACED_FOREACH(Type, type, kJSTypes) {
     Node* const lhs = Parameter(type);
     Reduction r = Reduce(
         graph()->NewNode(javascript()->StrictEqual(CompareOperationHint::kAny),
@@ -341,7 +342,7 @@ TEST_F(JSTypedLoweringTest, JSStoreContext) {
   Node* const effect = graph()->start();
   Node* const control = graph()->start();
   TRACED_FOREACH(size_t, index, kIndices) {
-    TRACED_FOREACH(Type*, type, kJSTypes) {
+    TRACED_FOREACH(Type, type, kJSTypes) {
       Node* const value = Parameter(type);
 
       Reduction const r1 =
@@ -401,12 +402,7 @@ TEST_F(JSTypedLoweringTest, JSAddWithString) {
   Reduction r = Reduce(graph()->NewNode(javascript()->Add(hint), lhs, rhs,
                                         context, frame_state, effect, control));
   ASSERT_TRUE(r.Changed());
-  EXPECT_THAT(r.replacement(),
-              IsCall(_, IsHeapConstant(
-                            CodeFactory::StringAdd(
-                                isolate(), STRING_ADD_CHECK_NONE, NOT_TENURED)
-                                .code()),
-                     lhs, rhs, context, frame_state, effect, control));
+  EXPECT_THAT(r.replacement(), IsStringConcat(_, lhs, rhs));
 }
 
 }  // namespace compiler

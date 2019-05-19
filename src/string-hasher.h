@@ -10,23 +10,15 @@
 namespace v8 {
 namespace internal {
 
-class ConsString;
-class String;
-
 template <typename T>
 class Vector;
 
-class V8_EXPORT_PRIVATE StringHasher {
+class V8_EXPORT_PRIVATE StringHasher final {
  public:
-  explicit inline StringHasher(int length, uint32_t seed);
-
+  StringHasher() = delete;
   template <typename schar>
   static inline uint32_t HashSequentialString(const schar* chars, int length,
-                                              uint32_t seed);
-
-  // Reads all the data, even for long strings and computes the utf16 length.
-  static uint32_t ComputeUtf8Hash(Vector<const char> chars, uint32_t seed,
-                                  int* utf16_length_out);
+                                              uint64_t seed);
 
   // Calculated hash value for a string consisting of 1 to
   // String::kMaxArrayIndexSize digits with no leading zeros (except "0").
@@ -39,49 +31,25 @@ class V8_EXPORT_PRIVATE StringHasher {
   static const int kZeroHash = 27;
 
   // Reusable parts of the hashing algorithm.
-  INLINE(static uint32_t AddCharacterCore(uint32_t running_hash, uint16_t c));
-  INLINE(static uint32_t GetHashCore(uint32_t running_hash));
-  INLINE(static uint32_t ComputeRunningHash(uint32_t running_hash,
-                                            const uc16* chars, int length));
-  INLINE(static uint32_t ComputeRunningHashOneByte(uint32_t running_hash,
-                                                   const char* chars,
-                                                   int length));
+  V8_INLINE static uint32_t AddCharacterCore(uint32_t running_hash, uint16_t c);
+  V8_INLINE static uint32_t GetHashCore(uint32_t running_hash);
 
- protected:
-  // Returns the value to store in the hash field of a string with
-  // the given length and contents.
-  uint32_t GetHashField();
-  // Returns true if the hash of this string can be computed without
-  // looking at the contents.
-  inline bool has_trivial_hash();
-  // Adds a block of characters to the hash.
-  template <typename Char>
-  inline void AddCharacters(const Char* chars, int len);
-
- private:
-  // Add a character to the hash.
-  inline void AddCharacter(uint16_t c);
-  // Update index. Returns true if string is still an index.
-  inline bool UpdateIndex(uint16_t c);
-
-  int length_;
-  uint32_t raw_running_hash_;
-  uint32_t array_index_;
-  bool is_array_index_;
-  bool is_first_char_;
-  DISALLOW_COPY_AND_ASSIGN(StringHasher);
+  static inline uint32_t GetTrivialHash(int length);
 };
 
-class IteratingStringHasher : public StringHasher {
- public:
-  static inline uint32_t Hash(String* string, uint32_t seed);
-  inline void VisitOneByteString(const uint8_t* chars, int length);
-  inline void VisitTwoByteString(const uint16_t* chars, int length);
+// Useful for std containers that require something ()'able.
+struct SeededStringHasher {
+  explicit SeededStringHasher(uint64_t hashseed) : hashseed_(hashseed) {}
+  inline std::size_t operator()(const char* name) const;
 
- private:
-  inline IteratingStringHasher(int len, uint32_t seed);
-  void VisitConsString(ConsString* cons_string);
-  DISALLOW_COPY_AND_ASSIGN(IteratingStringHasher);
+  uint64_t hashseed_;
+};
+
+// Useful for std containers that require something ()'able.
+struct StringEquals {
+  bool operator()(const char* name1, const char* name2) const {
+    return strcmp(name1, name2) == 0;
+  }
 };
 
 }  // namespace internal

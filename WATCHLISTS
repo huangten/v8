@@ -58,6 +58,10 @@
     'arm': {
       'filepath': '/arm/',
     },
+    'csa': {
+      'filepath': 'src/code-stub-assembler\.(cc|h)$' \
+                  '|src/builtins/.*-gen.(cc|h)$',
+    },
     'ia32': {
       'filepath': '/ia32/',
     },
@@ -78,6 +82,13 @@
       'filepath': 'src/ast/' \
                   '|src/parsing/',
     },
+    'profiler': {
+      'filepath': 'src/profiler/' \
+                  '|src/libsampler/',
+    },
+    'torque': {
+      'filepath': '.*\.tq$',
+    },
     'tracing': {
       'filepath': 'src/tracing/',
     },
@@ -85,13 +96,22 @@
 
   'WATCHLISTS': {
     'api': [
-      'adamk@chromium.org',
+      'adamk+watch@chromium.org',
+      'yangguo+watch@chromium.org',
+    ],
+    'csa': [
+      'jgruber+watch@chromium.org',
+    ],
+    'torque': [
+      'jgruber+watch@chromium.org',
     ],
     'snapshot': [
-      'yangguo@chromium.org',
+      'jgruber+watch@chromium.org',
+      'yangguo+watch@chromium.org',
     ],
     'debugger': [
-      'yangguo@chromium.org',
+      'jgruber+watch@chromium.org',
+      'yangguo+watch@chromium.org',
     ],
     'interpreter': [
       'rmcilroy@chromium.org',
@@ -120,10 +140,14 @@
       'jbroman+watch@chromium.org',
     ],
     'parser': [
-      'adamk@chromium.org',
+      'adamk+watch@chromium.org',
       'marja+watch@chromium.org',
     ],
+    'profiler': [
+      'alph+watch@chromium.org',
+    ],
     'tracing': [
+      'alph+watch@chromium.org',
       'lpy+v8tracing@chromium.org',
       'fmeawad@chromium.org',
     ],

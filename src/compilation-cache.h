@@ -26,7 +26,7 @@ class CompilationSubCache {
   CompilationSubCache(Isolate* isolate, int generations)
       : isolate_(isolate),
         generations_(generations) {
-    tables_ = NewArray<Object*>(generations);
+    tables_ = NewArray<Object>(generations);
   }
 
   ~CompilationSubCache() { DeleteArray(tables_); }
@@ -68,7 +68,7 @@ class CompilationSubCache {
  private:
   Isolate* isolate_;
   int generations_;  // Number of generations.
-  Object** tables_;  // Compilation cache tables - one for each generation.
+  Object* tables_;   // Compilation cache tables - one for each generation.
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(CompilationSubCache);
 };
@@ -83,7 +83,7 @@ class CompilationCacheScript : public CompilationSubCache {
                                          MaybeHandle<Object> name,
                                          int line_offset, int column_offset,
                                          ScriptOriginOptions resource_options,
-                                         Handle<Context> context,
+                                         Handle<Context> native_context,
                                          LanguageMode language_mode);
 
   void Put(Handle<String> source, Handle<Context> context,
@@ -150,7 +150,7 @@ class CompilationCacheRegExp: public CompilationSubCache {
 // scripts and evals. The shared function infos are looked up using
 // the source string as the key. For regular expressions the
 // compilation data is cached.
-class CompilationCache {
+class V8_EXPORT_PRIVATE CompilationCache {
  public:
   // Finds the script shared function info for a source
   // string. Returns an empty handle if the cache doesn't contain a
@@ -158,7 +158,7 @@ class CompilationCache {
   MaybeHandle<SharedFunctionInfo> LookupScript(
       Handle<String> source, MaybeHandle<Object> name, int line_offset,
       int column_offset, ScriptOriginOptions resource_options,
-      Handle<Context> context, LanguageMode language_mode);
+      Handle<Context> native_context, LanguageMode language_mode);
 
   // Finds the shared function info for a source string for eval in a
   // given context.  Returns an empty handle if the cache doesn't
@@ -175,7 +175,7 @@ class CompilationCache {
 
   // Associate the (source, kind) pair to the shared function
   // info. This may overwrite an existing mapping.
-  void PutScript(Handle<String> source, Handle<Context> context,
+  void PutScript(Handle<String> source, Handle<Context> native_context,
                  LanguageMode language_mode,
                  Handle<SharedFunctionInfo> function_info);
 
@@ -213,16 +213,16 @@ class CompilationCache {
 
  private:
   explicit CompilationCache(Isolate* isolate);
-  ~CompilationCache();
+  ~CompilationCache() = default;
 
   base::HashMap* EagerOptimizingSet();
 
   // The number of sub caches covering the different types to cache.
   static const int kSubCacheCount = 4;
 
-  bool IsEnabled() { return FLAG_compilation_cache && enabled_; }
+  bool IsEnabled() const { return FLAG_compilation_cache && enabled_; }
 
-  Isolate* isolate() { return isolate_; }
+  Isolate* isolate() const { return isolate_; }
 
   Isolate* isolate_;
 
@@ -239,7 +239,6 @@ class CompilationCache {
 
   DISALLOW_COPY_AND_ASSIGN(CompilationCache);
 };
-
 
 }  // namespace internal
 }  // namespace v8

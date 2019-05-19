@@ -12,11 +12,13 @@
 #ifndef V8_S390_SIMULATOR_S390_H_
 #define V8_S390_SIMULATOR_S390_H_
 
-#include "src/allocation.h"
+// globals.h defines USE_SIMULATOR.
+#include "src/globals.h"
 
 #if defined(USE_SIMULATOR)
 // Running with a simulator.
 
+#include "src/allocation.h"
 #include "src/assembler.h"
 #include "src/base/hashmap.h"
 #include "src/s390/constants-s390.h"
@@ -106,7 +108,8 @@ class Simulator : public SimulatorBase {
 
   // Accessors for register state.
   void set_register(int reg, uint64_t value);
-  uint64_t get_register(int reg) const;
+  const uint64_t& get_register(int reg) const;
+  uint64_t& get_register(int reg);
   template <typename T>
   T get_low_register(int reg) const;
   template <typename T>
@@ -117,20 +120,22 @@ class Simulator : public SimulatorBase {
   double get_double_from_register_pair(int reg);
   void set_d_register_from_double(int dreg, const double dbl) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
-    *bit_cast<double*>(&fp_registers_[dreg]) = dbl;
+    set_simd_register_by_lane<double>(dreg, 0, dbl);
   }
 
   double get_double_from_d_register(int dreg) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
-    return *bit_cast<double*>(&fp_registers_[dreg]);
+    return get_simd_register_by_lane<double>(dreg, 0);
   }
+
   void set_d_register(int dreg, int64_t value) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
-    fp_registers_[dreg] = value;
+    set_simd_register_by_lane<int64_t>(dreg, 0, value);
   }
+
   int64_t get_d_register(int dreg) {
     DCHECK(dreg >= 0 && dreg < kNumFPRs);
-    return fp_registers_[dreg];
+    return get_simd_register_by_lane<int64_t>(dreg, 0);
   }
 
   void set_d_register_from_float32(int dreg, const float f) {
@@ -153,9 +158,7 @@ class Simulator : public SimulatorBase {
   void set_pc(intptr_t value);
   intptr_t get_pc() const;
 
-  Address get_sp() const {
-    return reinterpret_cast<Address>(static_cast<intptr_t>(get_register(sp)));
-  }
+  Address get_sp() const { return static_cast<Address>(get_register(sp)); }
 
   // Accessor to the internal simulator stack area.
   uintptr_t StackLimit(uintptr_t c_limit) const;
@@ -164,14 +167,14 @@ class Simulator : public SimulatorBase {
   void Execute();
 
   template <typename Return, typename... Args>
-  Return Call(byte* entry, Args... args) {
+  Return Call(Address entry, Args... args) {
     return VariadicCall<Return>(this, &Simulator::CallImpl, entry, args...);
   }
 
   // Alternative: call a 2-argument double function.
-  void CallFP(byte* entry, double d0, double d1);
-  int32_t CallFPReturnsInt(byte* entry, double d0, double d1);
-  double CallFPReturnsDouble(byte* entry, double d0, double d1);
+  void CallFP(Address entry, double d0, double d1);
+  int32_t CallFPReturnsInt(Address entry, double d0, double d1);
+  double CallFPReturnsDouble(Address entry, double d0, double d1);
 
   // Push an address onto the JS stack.
   uintptr_t PushAddress(uintptr_t address);
@@ -207,7 +210,8 @@ class Simulator : public SimulatorBase {
     end_sim_pc = -2
   };
 
-  intptr_t CallImpl(byte* entry, int argument_count, const intptr_t* arguments);
+  intptr_t CallImpl(Address entry, int argument_count,
+                    const intptr_t* arguments);
 
   // Unsupported instructions use Format to print an error and stop execution.
   void Format(Instruction* instr, const char* format);
@@ -404,13 +408,49 @@ class Simulator : public SimulatorBase {
   void SetFpResult(const double& result);
   void TrashCallerSaveRegisters();
 
-  void CallInternal(byte* entry, int reg_arg_count = 3);
+  void CallInternal(Address entry, int reg_arg_count = 3);
 
   // Architecture state.
   // On z9 and higher and supported Linux on z Systems platforms, all registers
   // are 64-bit, even in 31-bit mode.
   uint64_t registers_[kNumGPRs];
-  int64_t fp_registers_[kNumFPRs];
+  union fpr_t {
+    int8_t int8[16];
+    uint8_t uint8[16];
+    int16_t int16[8];
+    uint16_t uint16[8];
+    int32_t int32[4];
+    uint32_t uint32[4];
+    int64_t int64[2];
+    uint64_t uint64[2];
+    float f32[4];
+    double f64[2];
+  };
+  fpr_t fp_registers_[kNumFPRs];
+
+  static constexpr fpr_t fp_zero = {{0}};
+
+  fpr_t& get_simd_register(int reg) {
+    return fp_registers_[reg];
+  }
+
+  void set_simd_register(int reg, const fpr_t& v) {
+    get_simd_register(reg) = v;
+  }
+
+  template<class T>
+  T& get_simd_register_by_lane(int reg, int lane) {
+    DCHECK_LE(lane, kSimd128Size / sizeof(T));
+    DCHECK_LT(reg, kNumFPRs);
+    DCHECK_GE(lane, 0);
+    DCHECK_GE(reg, 0);
+    return (reinterpret_cast<T*>(&get_simd_register(reg)))[lane];
+  }
+
+  template<class T>
+  void set_simd_register_by_lane(int reg, int lane, const T& value) {
+    get_simd_register_by_lane<T>(reg, lane) = value;
+  }
 
   // Condition Code register. In S390, the last 4 bits are used.
   int32_t condition_reg_;
@@ -460,10 +500,18 @@ class Simulator : public SimulatorBase {
   static void EvalTableInit();
 
 #define EVALUATE(name) int Evaluate_##name(Instruction* instr)
-#define EVALUATE_VRR_INSTRUCTIONS(name, op_name, op_value) EVALUATE(op_name);
-  S390_VRR_C_OPCODE_LIST(EVALUATE_VRR_INSTRUCTIONS)
-  S390_VRR_A_OPCODE_LIST(EVALUATE_VRR_INSTRUCTIONS)
-#undef EVALUATE_VRR_INSTRUCTIONS
+#define EVALUATE_VR_INSTRUCTIONS(name, op_name, op_value) EVALUATE(op_name);
+  S390_VRR_A_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRR_C_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRR_E_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRX_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRS_A_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRS_B_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRS_C_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRR_B_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRI_A_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+  S390_VRI_C_OPCODE_LIST(EVALUATE_VR_INSTRUCTIONS)
+#undef EVALUATE_VR_INSTRUCTIONS
 
   EVALUATE(DUMY);
   EVALUATE(BKPT);

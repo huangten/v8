@@ -14,7 +14,7 @@ namespace internal {
 void CompilationStatistics::RecordPhaseStats(const char* phase_kind_name,
                                              const char* phase_name,
                                              const BasicStats& stats) {
-  base::LockGuard<base::Mutex> guard(&record_mutex_);
+  base::MutexGuard guard(&record_mutex_);
 
   std::string phase_name_str(phase_name);
   auto it = phase_map_.find(phase_name_str);
@@ -28,7 +28,7 @@ void CompilationStatistics::RecordPhaseStats(const char* phase_kind_name,
 
 void CompilationStatistics::RecordPhaseKindStats(const char* phase_kind_name,
                                                  const BasicStats& stats) {
-  base::LockGuard<base::Mutex> guard(&record_mutex_);
+  base::MutexGuard guard(&record_mutex_);
 
   std::string phase_kind_name_str(phase_kind_name);
   auto it = phase_kind_map_.find(phase_kind_name_str);
@@ -43,7 +43,7 @@ void CompilationStatistics::RecordPhaseKindStats(const char* phase_kind_name,
 
 void CompilationStatistics::RecordTotalStats(size_t source_size,
                                              const BasicStats& stats) {
-  base::LockGuard<base::Mutex> guard(&record_mutex_);
+  base::MutexGuard guard(&record_mutex_);
 
   source_size += source_size;
   total_stats_.Accumulate(stats);
@@ -73,18 +73,18 @@ static void WriteLine(std::ostream& os, bool machine_format, const char* name,
       static_cast<double>(total_stats.total_allocated_bytes_);
   if (machine_format) {
     base::OS::SNPrintF(buffer, kBufferSize,
-                       "\"%s_time\"=%.3f\n\"%s_space\"=%" PRIuS, name, ms, name,
+                       "\"%s_time\"=%.3f\n\"%s_space\"=%zu", name, ms, name,
                        stats.total_allocated_bytes_);
     os << buffer;
   } else {
-    base::OS::SNPrintF(buffer, kBufferSize, "%28s %10.3f (%5.1f%%)  %10" PRIuS
-                                            " (%5.1f%%) %10" PRIuS " %10" PRIuS,
+    base::OS::SNPrintF(buffer, kBufferSize,
+                       "%34s %10.3f (%5.1f%%)  %10zu (%5.1f%%) %10zu %10zu",
                        name, ms, percent, stats.total_allocated_bytes_,
                        size_percent, stats.max_allocated_bytes_,
                        stats.absolute_max_allocated_bytes_);
 
     os << buffer;
-    if (stats.function_name_.size() > 0) {
+    if (!stats.function_name_.empty()) {
       os << "   " << stats.function_name_.c_str();
     }
     os << std::endl;
@@ -93,24 +93,24 @@ static void WriteLine(std::ostream& os, bool machine_format, const char* name,
 
 
 static void WriteFullLine(std::ostream& os) {
-  os << "--------------------------------------------------------"
-        "--------------------------------------------------------\n";
+  os << "-----------------------------------------------------------"
+        "-----------------------------------------------------------\n";
 }
 
 
 static void WriteHeader(std::ostream& os) {
   WriteFullLine(os);
-  os << "             Turbofan phase         Time (ms)             "
-     << "          Space (bytes)             Function\n"
-     << "                                                         "
-     << "  Total          Max.     Abs. max.\n";
+  os << "                Turbofan phase            Time (ms)    "
+     << "                   Space (bytes)             Function\n"
+     << "                                                       "
+     << "          Total          Max.     Abs. max.\n";
   WriteFullLine(os);
 }
 
 
 static void WritePhaseKindBreak(std::ostream& os) {
-  os << "                             ---------------------------"
-        "--------------------------------------------------------\n";
+  os << "                                   ------------------------"
+        "-----------------------------------------------------------\n";
 }
 
 std::ostream& operator<<(std::ostream& os, const AsPrintableStatistics& ps) {

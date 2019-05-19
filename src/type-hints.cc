@@ -51,6 +51,8 @@ std::ostream& operator<<(std::ostream& os, CompareOperationHint hint) {
       return os << "BigInt";
     case CompareOperationHint::kReceiver:
       return os << "Receiver";
+    case CompareOperationHint::kReceiverOrNullOrUndefined:
+      return os << "ReceiverOrNullOrUndefined";
     case CompareOperationHint::kAny:
       return os << "Any";
   }
@@ -75,18 +77,10 @@ std::ostream& operator<<(std::ostream& os, const StringAddFlags& flags) {
   switch (flags) {
     case STRING_ADD_CHECK_NONE:
       return os << "CheckNone";
-    case STRING_ADD_CHECK_LEFT:
-      return os << "CheckLeft";
-    case STRING_ADD_CHECK_RIGHT:
-      return os << "CheckRight";
-    case STRING_ADD_CHECK_BOTH:
-      return os << "CheckBoth";
     case STRING_ADD_CONVERT_LEFT:
       return os << "ConvertLeft";
     case STRING_ADD_CONVERT_RIGHT:
       return os << "ConvertRight";
-    case STRING_ADD_CONVERT:
-      break;
   }
   UNREACHABLE();
 }

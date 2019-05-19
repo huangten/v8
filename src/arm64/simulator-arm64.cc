@@ -2,18 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/arm64/simulator-arm64.h"
+
+#if defined(USE_SIMULATOR)
+
 #include <stdlib.h>
 #include <cmath>
 #include <cstdarg>
 #include <type_traits>
 
-#if V8_TARGET_ARCH_ARM64
-
 #include "src/arm64/decoder-arm64-inl.h"
-#include "src/arm64/simulator-arm64.h"
 #include "src/assembler-inl.h"
-#include "src/codegen.h"
+#include "src/base/lazy-instance.h"
 #include "src/disasm.h"
+#include "src/heap/combined-heap.h"
 #include "src/macro-assembler.h"
 #include "src/objects-inl.h"
 #include "src/ostreams.h"
@@ -21,8 +23,6 @@
 
 namespace v8 {
 namespace internal {
-
-#if defined(USE_SIMULATOR)
 
 
 // This macro provides a platform independent use of sscanf. The reason for
@@ -58,9 +58,8 @@ TEXT_COLOUR clr_debug_number   = FLAG_log_colour ? COLOUR_BOLD(YELLOW)  : "";
 TEXT_COLOUR clr_debug_message  = FLAG_log_colour ? COLOUR(YELLOW)       : "";
 TEXT_COLOUR clr_printf         = FLAG_log_colour ? COLOUR(GREEN)        : "";
 
-// static
-base::LazyInstance<Simulator::GlobalMonitor>::type Simulator::global_monitor_ =
-    LAZY_INSTANCE_INITIALIZER;
+DEFINE_LAZY_LEAKY_OBJECT_GETTER(Simulator::GlobalMonitor,
+                                Simulator::GlobalMonitor::Get)
 
 // This is basically the same as PrintF, with a guard for FLAG_trace_sim.
 void Simulator::TraceSim(const char* format, ...) {
@@ -117,7 +116,7 @@ Simulator* Simulator::current(Isolate* isolate) {
   return sim;
 }
 
-void Simulator::CallImpl(byte* entry, CallArgument* args) {
+void Simulator::CallImpl(Address entry, CallArgument* args) {
   int index_x = 0;
   int index_d = 0;
 
@@ -254,9 +253,9 @@ uintptr_t Simulator::PushAddress(uintptr_t address) {
   intptr_t new_sp = sp() - 2 * kXRegSize;
   uintptr_t* alignment_slot =
     reinterpret_cast<uintptr_t*>(new_sp + kXRegSize);
-  memcpy(alignment_slot, &kSlotsZapValue, kPointerSize);
+  memcpy(alignment_slot, &kSlotsZapValue, kSystemPointerSize);
   uintptr_t* stack_slot = reinterpret_cast<uintptr_t*>(new_sp);
-  memcpy(stack_slot, &address, kPointerSize);
+  memcpy(stack_slot, &address, kSystemPointerSize);
   set_sp(new_sp);
   return new_sp;
 }
@@ -277,7 +276,7 @@ uintptr_t Simulator::StackLimit(uintptr_t c_limit) const {
   // The simulator uses a separate JS stack. If we have exhausted the C stack,
   // we also drop down the JS limit to reflect the exhaustion on the JS stack.
   if (GetCurrentStackPosition() < c_limit) {
-    return reinterpret_cast<uintptr_t>(get_sp());
+    return get_sp();
   }
 
   // Otherwise the limit is the JS stack. Leave a safety margin of 1024 bytes
@@ -332,7 +331,7 @@ void Simulator::Init(FILE* stream) {
   stack_limit_ = stack_ + stack_protection_size_;
   uintptr_t tos = stack_ + stack_size_ - stack_protection_size_;
   // The stack pointer must be 16-byte aligned.
-  set_sp(tos & ~0xFUL);
+  set_sp(tos & ~0xFULL);
 
   stream_ = stream;
   print_disasm_ = new PrintDisassembler(stream_);
@@ -362,13 +361,13 @@ void Simulator::ResetState() {
   set_lr(kEndOfSimAddress);
 
   // Reset debug helpers.
-  breakpoints_.empty();
+  breakpoints_.clear();
   break_on_next_ = false;
 }
 
 
 Simulator::~Simulator() {
-  global_monitor_.Pointer()->RemoveProcessor(&global_monitor_processor_);
+  GlobalMonitor::Get()->RemoveProcessor(&global_monitor_processor_);
   delete[] reinterpret_cast<byte*>(stack_);
   if (FLAG_log_instruction_stats) {
     delete instrument_;
@@ -403,6 +402,14 @@ void Simulator::RunFrom(Instruction* start) {
 // uses the ObjectPair structure.
 // The simulator assumes all runtime calls return two 64-bits values. If they
 // don't, register x1 is clobbered. This is fine because x1 is caller-saved.
+#if defined(V8_OS_WIN)
+typedef int64_t (*SimulatorRuntimeCall_ReturnPtr)(int64_t arg0, int64_t arg1,
+                                                  int64_t arg2, int64_t arg3,
+                                                  int64_t arg4, int64_t arg5,
+                                                  int64_t arg6, int64_t arg7,
+                                                  int64_t arg8);
+#endif
+
 typedef ObjectPair (*SimulatorRuntimeCall)(int64_t arg0, int64_t arg1,
                                            int64_t arg2, int64_t arg3,
                                            int64_t arg4, int64_t arg5,
@@ -461,15 +468,18 @@ void Simulator::DoRuntimeCall(Instruction* instr) {
     default:
       TraceSim("Type: Unknown.\n");
       UNREACHABLE();
-      break;
 
     case ExternalReference::BUILTIN_CALL:
-    case ExternalReference::BUILTIN_CALL_PAIR: {
-      // Object* f(v8::internal::Arguments) or
-      // ObjectPair f(v8::internal::Arguments).
+#if defined(V8_OS_WIN)
+    {
+      // Object f(v8::internal::Arguments).
       TraceSim("Type: BUILTIN_CALL\n");
-      SimulatorRuntimeCall target =
-        reinterpret_cast<SimulatorRuntimeCall>(external);
+
+      // When this simulator runs on Windows x64 host, function with ObjectPair
+      // return type accepts an implicit pointer to caller allocated memory for
+      // ObjectPair as return value. This diverges the calling convention from
+      // function which returns primitive type, so function returns ObjectPair
+      // and primitive type cannot share implementation.
 
       // We don't know how many arguments are being passed, but we can
       // pass 8 without touching the stack. They will be ignored by the
@@ -486,15 +496,52 @@ void Simulator::DoRuntimeCall(Instruction* instr) {
           ", "
           "0x%016" PRIx64,
           arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
-      ObjectPair result =
+
+      SimulatorRuntimeCall_ReturnPtr target =
+          reinterpret_cast<SimulatorRuntimeCall_ReturnPtr>(external);
+
+      int64_t result =
           target(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
-      TraceSim("Returned: {%p, %p}\n", static_cast<void*>(result.x),
-               static_cast<void*>(result.y));
+      TraceSim("Returned: 0x%16\n", result);
 #ifdef DEBUG
       CorruptAllCallerSavedCPURegisters();
 #endif
-      set_xreg(0, reinterpret_cast<int64_t>(result.x));
-      set_xreg(1, reinterpret_cast<int64_t>(result.y));
+      set_xreg(0, result);
+
+      break;
+    }
+#endif
+    case ExternalReference::BUILTIN_CALL_PAIR: {
+      // Object f(v8::internal::Arguments) or
+      // ObjectPair f(v8::internal::Arguments).
+      TraceSim("Type: BUILTIN_CALL\n");
+
+      // We don't know how many arguments are being passed, but we can
+      // pass 8 without touching the stack. They will be ignored by the
+      // host function if they aren't used.
+      TraceSim(
+          "Arguments: "
+          "0x%016" PRIx64 ", 0x%016" PRIx64
+          ", "
+          "0x%016" PRIx64 ", 0x%016" PRIx64
+          ", "
+          "0x%016" PRIx64 ", 0x%016" PRIx64
+          ", "
+          "0x%016" PRIx64 ", 0x%016" PRIx64
+          ", "
+          "0x%016" PRIx64,
+          arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+      SimulatorRuntimeCall target =
+          reinterpret_cast<SimulatorRuntimeCall>(external);
+      ObjectPair result =
+          target(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+      TraceSim("Returned: {%p, %p}\n", reinterpret_cast<void*>(result.x),
+               reinterpret_cast<void*>(result.y));
+#ifdef DEBUG
+      CorruptAllCallerSavedCPURegisters();
+#endif
+      set_xreg(0, static_cast<int64_t>(result.x));
+      set_xreg(1, static_cast<int64_t>(result.y));
       break;
     }
 
@@ -725,7 +772,6 @@ void LogicVRegister::ReadUintFromMem(VectorFormat vform, int index,
       break;
     default:
       UNREACHABLE();
-      return;
   }
 }
 
@@ -748,7 +794,6 @@ void LogicVRegister::WriteUintToMem(VectorFormat vform, int index,
       break;
     default:
       UNREACHABLE();
-      return;
   }
 }
 
@@ -1081,7 +1126,7 @@ void Simulator::CheckBreakNext() {
 
 
 void Simulator::PrintInstructionsAt(Instruction* start, uint64_t count) {
-  Instruction* end = start->InstructionAtOffset(count * kInstructionSize);
+  Instruction* end = start->InstructionAtOffset(count * kInstrSize);
   for (Instruction* pc = start; pc < end; pc = pc->following()) {
     disassembler_decoder_->Decode(pc);
   }
@@ -1440,7 +1485,6 @@ void Simulator::VisitPCRelAddressing(Instruction* instr) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
 }
 
@@ -1489,7 +1533,7 @@ void Simulator::VisitUnconditionalBranchToRegister(Instruction* instr) {
 void Simulator::VisitTestBranch(Instruction* instr) {
   unsigned bit_pos = (instr->ImmTestBranchBit5() << 5) |
                      instr->ImmTestBranchBit40();
-  bool take_branch = ((xreg(instr->Rt()) & (1UL << bit_pos)) == 0);
+  bool take_branch = ((xreg(instr->Rt()) & (1ULL << bit_pos)) == 0);
   switch (instr->Mask(TestBranchMask)) {
     case TBZ: break;
     case TBNZ: take_branch = !take_branch; break;
@@ -1731,12 +1775,12 @@ void Simulator::LoadStoreHelper(Instruction* instr,
   uintptr_t stack = 0;
 
   {
-    base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
     if (instr->IsLoad()) {
       local_monitor_.NotifyLoad();
     } else {
       local_monitor_.NotifyStore();
-      global_monitor_.Pointer()->NotifyStore_Locked(&global_monitor_processor_);
+      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     }
   }
 
@@ -1858,19 +1902,19 @@ void Simulator::LoadStorePairHelper(Instruction* instr,
   unsigned rt = instr->Rt();
   unsigned rt2 = instr->Rt2();
   unsigned addr_reg = instr->Rn();
-  size_t access_size = 1 << instr->SizeLSPair();
+  size_t access_size = 1ULL << instr->SizeLSPair();
   int64_t offset = instr->ImmLSPair() * access_size;
   uintptr_t address = LoadStoreAddress(addr_reg, offset, addrmode);
   uintptr_t address2 = address + access_size;
   uintptr_t stack = 0;
 
   {
-    base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
     if (instr->IsLoad()) {
       local_monitor_.NotifyLoad();
     } else {
       local_monitor_.NotifyStore();
-      global_monitor_.Pointer()->NotifyStore_Locked(&global_monitor_processor_);
+      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     }
   }
 
@@ -2016,7 +2060,7 @@ void Simulator::VisitLoadLiteral(Instruction* instr) {
   unsigned rt = instr->Rt();
 
   {
-    base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
     local_monitor_.NotifyLoad();
   }
 
@@ -2083,6 +2127,8 @@ Simulator::TransactionSize Simulator::get_transaction_size(unsigned size) {
       return TransactionSize::HalfWord;
     case 4:
       return TransactionSize::Word;
+    case 8:
+      return TransactionSize::DoubleWord;
     default:
       UNREACHABLE();
   }
@@ -2105,12 +2151,12 @@ void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
   unsigned access_size = 1 << instr->LoadStoreXSizeLog2();
   uintptr_t address = LoadStoreAddress(rn, 0, AddrMode::Offset);
   DCHECK_EQ(address % access_size, 0);
-  base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+  base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
   if (is_load != 0) {
     if (is_exclusive) {
       local_monitor_.NotifyLoadExcl(address, get_transaction_size(access_size));
-      global_monitor_.Pointer()->NotifyLoadExcl_Locked(
-          address, &global_monitor_processor_);
+      GlobalMonitor::Get()->NotifyLoadExcl_Locked(address,
+                                                  &global_monitor_processor_);
     } else {
       local_monitor_.NotifyLoad();
     }
@@ -2127,6 +2173,10 @@ void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
       case LDAXR_w:
         set_wreg_no_log(rt, MemoryRead<uint32_t>(address));
         break;
+      case LDAR_x:
+      case LDAXR_x:
+        set_xreg_no_log(rt, MemoryRead<uint64_t>(address));
+        break;
       default:
         UNIMPLEMENTED();
     }
@@ -2138,7 +2188,7 @@ void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
       DCHECK_NE(rs, rn);
       if (local_monitor_.NotifyStoreExcl(address,
                                          get_transaction_size(access_size)) &&
-          global_monitor_.Pointer()->NotifyStoreExcl_Locked(
+          GlobalMonitor::Get()->NotifyStoreExcl_Locked(
               address, &global_monitor_processor_)) {
         switch (op) {
           case STLXR_b:
@@ -2150,6 +2200,9 @@ void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
           case STLXR_w:
             MemoryWrite<uint32_t>(address, wreg(rt));
             break;
+          case STLXR_x:
+            MemoryWrite<uint64_t>(address, xreg(rt));
+            break;
           default:
             UNIMPLEMENTED();
         }
@@ -2160,7 +2213,7 @@ void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
       }
     } else {
       local_monitor_.NotifyStore();
-      global_monitor_.Pointer()->NotifyStore_Locked(&global_monitor_processor_);
+      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
       switch (op) {
         case STLR_b:
           MemoryWrite<uint8_t>(address, wreg(rt));
@@ -2170,6 +2223,9 @@ void Simulator::VisitLoadStoreAcquireRelease(Instruction* instr) {
           break;
         case STLR_w:
           MemoryWrite<uint32_t>(address, wreg(rt));
+          break;
+        case STLR_x:
+          MemoryWrite<uint64_t>(address, xreg(rt));
           break;
         default:
           UNIMPLEMENTED();
@@ -2219,7 +2275,8 @@ void Simulator::VisitMoveWideImmediate(Instruction* instr) {
         unsigned reg_code = instr->Rd();
         int64_t prev_xn_val = is_64_bits ? xreg(reg_code)
                                          : wreg(reg_code);
-        new_xn_val = (prev_xn_val & ~(0xFFFFL << shift)) | shifted_imm16;
+        new_xn_val =
+            (prev_xn_val & ~(INT64_C(0xFFFF) << shift)) | shifted_imm16;
         break;
     }
     case MOVZ_w:
@@ -2254,7 +2311,7 @@ void Simulator::VisitConditionalSelect(Instruction* instr) {
         break;
       case CSNEG_w:
       case CSNEG_x:
-        new_val = -new_val;
+        new_val = (uint64_t)(-(int64_t)new_val);
         break;
       default: UNIMPLEMENTED();
     }
@@ -2384,14 +2441,14 @@ static int64_t MultiplyHighSigned(int64_t u, int64_t v) {
   uint64_t u0, v0, w0;
   int64_t u1, v1, w1, w2, t;
 
-  u0 = u & 0xFFFFFFFFL;
+  u0 = u & 0xFFFFFFFFLL;
   u1 = u >> 32;
-  v0 = v & 0xFFFFFFFFL;
+  v0 = v & 0xFFFFFFFFLL;
   v1 = v >> 32;
 
   w0 = u0 * v0;
   t = u1 * v0 + (w0 >> 32);
-  w1 = t & 0xFFFFFFFFL;
+  w1 = t & 0xFFFFFFFFLL;
   w2 = t >> 32;
   w1 = u0 * v1 + w1;
 
@@ -2446,7 +2503,7 @@ void Simulator::BitfieldHelper(Instruction* instr) {
     mask = diff < reg_size - 1 ? (static_cast<T>(1) << (diff + 1)) - 1
                                : static_cast<T>(-1);
   } else {
-    uint64_t umask = ((1L << (S + 1)) - 1);
+    uint64_t umask = ((1LL << (S + 1)) - 1);
     umask = (umask >> R) | (umask << (reg_size - R));
     mask = static_cast<T>(umask);
     diff += reg_size;
@@ -2961,7 +3018,11 @@ void Simulator::VisitSystem(Instruction* instr) {
       default: UNIMPLEMENTED();
     }
   } else if (instr->Mask(MemBarrierFMask) == MemBarrierFixed) {
+#if defined(V8_OS_WIN)
+    MemoryBarrier();
+#else
     __sync_synchronize();
+#endif
   } else {
     UNIMPLEMENTED();
   }
@@ -3172,9 +3233,9 @@ void Simulator::Debug() {
                  (strcmp(cmd, "po") == 0)) {
         if (argc == 2) {
           int64_t value;
-          OFStream os(stdout);
+          StdoutStream os;
           if (GetValue(arg1, &value)) {
-            Object* obj = reinterpret_cast<Object*>(value);
+            Object obj(value);
             os << arg1 << ": \n";
 #ifdef DEBUG
             obj->Print(os);
@@ -3227,16 +3288,13 @@ void Simulator::Debug() {
         while (cur < end) {
           PrintF("  0x%016" PRIx64 ":  0x%016" PRIx64 " %10" PRId64,
                  reinterpret_cast<uint64_t>(cur), *cur, *cur);
-          HeapObject* obj = reinterpret_cast<HeapObject*>(*cur);
-          int64_t value = *cur;
+          Object obj(*cur);
           Heap* current_heap = isolate_->heap();
-          if (((value & 1) == 0) ||
-              current_heap->ContainsSlow(obj->address())) {
+          if (obj.IsSmi() ||
+              IsValidHeapObject(current_heap, HeapObject::cast(obj))) {
             PrintF(" (");
-            if ((value & kSmiTagMask) == 0) {
-              STATIC_ASSERT(kSmiValueSize == 32);
-              int32_t untagged = (value >> kSmiShift) & 0xFFFFFFFF;
-              PrintF("smi %" PRId32, untagged);
+            if (obj.IsSmi()) {
+              PrintF("smi %" PRId32, Smi::ToInt(obj));
             } else {
               obj->ShortPrint();
             }
@@ -3403,7 +3461,7 @@ void Simulator::VisitException(Instruction* instr) {
         // The stop parameters are inlined in the code. Skip them:
         //  - Skip to the end of the message string.
         size_t size = kDebugMessageOffset + strlen(message) + 1;
-        pc_ = pc_->InstructionAtOffset(RoundUp(size, kInstructionSize));
+        pc_ = pc_->InstructionAtOffset(RoundUp(size, kInstrSize));
         //  - Verify that the unreachable marker is present.
         DCHECK(pc_->Mask(ExceptionMask) == HLT);
         DCHECK_EQ(pc_->ImmException(), kImmExceptionIsUnreachable);
@@ -4471,12 +4529,12 @@ void Simulator::NEONLoadStoreMultiStructHelper(const Instruction* instr,
   }
 
   {
-    base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
     if (log_read) {
       local_monitor_.NotifyLoad();
     } else {
       local_monitor_.NotifyStore();
-      global_monitor_.Pointer()->NotifyStore_Locked(&global_monitor_processor_);
+      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     }
   }
 
@@ -4717,12 +4775,12 @@ void Simulator::NEONLoadStoreSingleStructHelper(const Instruction* instr,
   }
 
   {
-    base::LockGuard<base::Mutex> lock_guard(&global_monitor_.Pointer()->mutex);
+    base::MutexGuard lock_guard(&GlobalMonitor::Get()->mutex);
     if (do_load) {
       local_monitor_.NotifyLoad();
     } else {
       local_monitor_.NotifyStore();
-      global_monitor_.Pointer()->NotifyStore_Locked(&global_monitor_processor_);
+      GlobalMonitor::Get()->NotifyStore_Locked(&global_monitor_processor_);
     }
   }
 
@@ -4785,7 +4843,7 @@ void Simulator::VisitNEONModifiedImmediate(Instruction* instr) {
         vform = q ? kFormat2D : kFormat1D;
         imm = 0;
         for (int i = 0; i < 8; ++i) {
-          if (imm8 & (1 << i)) {
+          if (imm8 & (1ULL << i)) {
             imm |= (UINT64_C(0xFF) << (8 * i));
           }
         }
@@ -5800,8 +5858,6 @@ bool Simulator::GlobalMonitor::Processor::NotifyStoreExcl_Locked(
   return false;
 }
 
-Simulator::GlobalMonitor::GlobalMonitor() : head_(nullptr) {}
-
 void Simulator::GlobalMonitor::NotifyLoadExcl_Locked(uintptr_t addr,
                                                      Processor* processor) {
   processor->NotifyLoadExcl_Locked(addr);
@@ -5851,7 +5907,7 @@ void Simulator::GlobalMonitor::PrependProcessor_Locked(Processor* processor) {
 }
 
 void Simulator::GlobalMonitor::RemoveProcessor(Processor* processor) {
-  base::LockGuard<base::Mutex> lock_guard(&mutex);
+  base::MutexGuard lock_guard(&mutex);
   if (!IsProcessorInLinkedList_Locked(processor)) {
     return;
   }
@@ -5868,9 +5924,7 @@ void Simulator::GlobalMonitor::RemoveProcessor(Processor* processor) {
   processor->next_ = nullptr;
 }
 
-#endif  // USE_SIMULATOR
-
 }  // namespace internal
 }  // namespace v8
 
-#endif  // V8_TARGET_ARCH_ARM64
+#endif  // USE_SIMULATOR

@@ -5,7 +5,7 @@
 #include "src/assembler.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/node-properties.h"
-#include "src/factory-inl.h"
+#include "src/heap/factory-inl.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/value-helper.h"
 
@@ -15,7 +15,7 @@ namespace compiler {
 
 class JSCacheTesterHelper {
  protected:
-  JSCacheTesterHelper(Isolate* isolate, Zone* zone)
+  explicit JSCacheTesterHelper(Zone* zone)
       : main_graph_(zone),
         main_common_(zone),
         main_javascript_(zone),
@@ -33,7 +33,7 @@ class JSConstantCacheTester : public HandleAndZoneScope,
                               public JSGraph {
  public:
   JSConstantCacheTester()
-      : JSCacheTesterHelper(main_isolate(), main_zone()),
+      : JSCacheTesterHelper(main_zone()),
         JSGraph(main_isolate(), &main_graph_, &main_common_, &main_javascript_,
                 nullptr, &main_machine_) {
     main_graph_.SetStart(main_graph_.NewNode(common()->Start(0)));
@@ -43,7 +43,7 @@ class JSConstantCacheTester : public HandleAndZoneScope,
 
   Handle<HeapObject> handle(Node* node) {
     CHECK_EQ(IrOpcode::kHeapConstant, node->opcode());
-    return OpParameter<Handle<HeapObject>>(node->op());
+    return HeapConstantOf(node->op());
   }
 
   Factory* factory() { return main_isolate()->factory(); }
@@ -167,9 +167,9 @@ TEST(CanonicalizingNumbers) {
   JSConstantCacheTester T;
 
   FOR_FLOAT64_INPUTS(i) {
-    Node* node = T.Constant(*i);
+    Node* node = T.Constant(i);
     for (int j = 0; j < 5; j++) {
-      CHECK_EQ(node, T.Constant(*i));
+      CHECK_EQ(node, T.Constant(i));
     }
   }
 }
@@ -178,8 +178,7 @@ TEST(CanonicalizingNumbers) {
 TEST(HeapNumbers) {
   JSConstantCacheTester T;
 
-  FOR_FLOAT64_INPUTS(i) {
-    double value = *i;
+  FOR_FLOAT64_INPUTS(value) {
     Handle<Object> num = T.factory()->NewNumber(value);
     Handle<HeapNumber> heap = T.factory()->NewHeapNumber(value);
     Node* node1 = T.Constant(value);

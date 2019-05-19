@@ -10,25 +10,33 @@
 
 #include "src/allocation.h"
 #include "src/bailout-reason.h"
+#include "src/base/platform/elapsed-timer.h"
 #include "src/code-events.h"
 #include "src/contexts.h"
 #include "src/isolate.h"
-#include "src/unicode-cache.h"
 #include "src/zone/zone.h"
 
 namespace v8 {
 namespace internal {
 
 // Forward declarations.
-class CompilationInfo;
-class CompilationJob;
+class AstRawString;
+class BackgroundCompileTask;
+class IsCompiledScope;
 class JavaScriptFrame;
+class OptimizedCompilationInfo;
+class OptimizedCompilationJob;
 class ParseInfo;
 class Parser;
 class ScriptData;
 struct ScriptStreamingData;
+class TimedHistogram;
+class UnoptimizedCompilationInfo;
+class UnoptimizedCompilationJob;
+class WorkerThreadRuntimeCallStats;
 
-typedef std::forward_list<std::unique_ptr<CompilationJob>> CompilationJobList;
+typedef std::forward_list<std::unique_ptr<UnoptimizedCompilationJob>>
+    UnoptimizedCompilationJobList;
 
 // The V8 compiler API.
 //
@@ -51,25 +59,34 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // given function holds (except for live-edit, which compiles the world).
 
   static bool Compile(Handle<SharedFunctionInfo> shared,
-                      ClearExceptionFlag flag);
-  static bool Compile(Handle<JSFunction> function, ClearExceptionFlag flag);
+                      ClearExceptionFlag flag,
+                      IsCompiledScope* is_compiled_scope);
+  static bool Compile(Handle<JSFunction> function, ClearExceptionFlag flag,
+                      IsCompiledScope* is_compiled_scope);
   static bool CompileOptimized(Handle<JSFunction> function, ConcurrencyMode);
-  static MaybeHandle<JSArray> CompileForLiveEdit(Handle<Script> script);
 
-  // Creates a new task that when run will parse and compile the streamed
-  // script associated with |streaming_data| and can be finalized with
-  // Compiler::GetSharedFunctionInfoForStreamedScript.
-  // Note: does not take ownership of streaming_data.
-  static ScriptCompiler::ScriptStreamingTask* NewBackgroundCompileTask(
-      ScriptStreamingData* streaming_data, Isolate* isolate);
+  // Collect source positions for a function that has already been compiled to
+  // bytecode, but for which source positions were not collected (e.g. because
+  // they were not immediately needed).
+  static bool CollectSourcePositions(Isolate* isolate,
+                                     Handle<SharedFunctionInfo> shared);
 
-  // Generate and install code from previously queued compilation job.
-  static bool FinalizeCompilationJob(CompilationJob* job, Isolate* isolate);
+  V8_WARN_UNUSED_RESULT static MaybeHandle<SharedFunctionInfo>
+  CompileForLiveEdit(ParseInfo* parse_info, Isolate* isolate);
+
+  // Finalize and install code from previously run background compile task.
+  static bool FinalizeBackgroundCompileTask(
+      BackgroundCompileTask* task, Handle<SharedFunctionInfo> shared_info,
+      Isolate* isolate, ClearExceptionFlag flag);
+
+  // Finalize and install optimized code from previously run job.
+  static bool FinalizeOptimizedCompilationJob(OptimizedCompilationJob* job,
+                                              Isolate* isolate);
 
   // Give the compiler a chance to perform low-latency initialization tasks of
   // the given {function} on its instantiation. Note that only the runtime will
   // offer this chance, optimized closure instantiation will not call this.
-  static void PostInstantiation(Handle<JSFunction> function, PretenureFlag);
+  static void PostInstantiation(Handle<JSFunction> function, AllocationType);
 
   // Parser::Parse, then Compiler::Analyze.
   static bool ParseAndAnalyze(ParseInfo* parse_info,
@@ -88,32 +105,11 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // real function with a context.
 
   // Create a (bound) function for a String source within a context for eval.
-  MUST_USE_RESULT static MaybeHandle<JSFunction> GetFunctionFromEval(
+  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetFunctionFromEval(
       Handle<String> source, Handle<SharedFunctionInfo> outer_info,
       Handle<Context> context, LanguageMode language_mode,
       ParseRestriction restriction, int parameters_end_pos,
-      int eval_scope_position, int eval_position, int line_offset = 0,
-      int column_offset = 0, Handle<Object> script_name = Handle<Object>(),
-      ScriptOriginOptions options = ScriptOriginOptions());
-
-  // Create a function that results from wrapping |source| in a function,
-  // with |arguments| being a list of parameters for that function.
-  MUST_USE_RESULT static MaybeHandle<JSFunction> GetWrappedFunction(
-      Handle<String> source, Handle<FixedArray> arguments,
-      Handle<Context> context, int line_offset = 0, int column_offset = 0,
-      Handle<Object> script_name = Handle<Object>(),
-      ScriptOriginOptions options = ScriptOriginOptions());
-
-  // Returns true if the embedder permits compiling the given source string in
-  // the given context.
-  static bool CodeGenerationFromStringsAllowed(Isolate* isolate,
-                                               Handle<Context> context,
-                                               Handle<String> source);
-
-  // Create a (bound) function for a String source within a context for eval.
-  MUST_USE_RESULT static MaybeHandle<JSFunction> GetFunctionFromString(
-      Handle<Context> context, Handle<String> source,
-      ParseRestriction restriction, int parameters_end_pos);
+      int eval_scope_position, int eval_position);
 
   struct ScriptDetails {
     ScriptDetails() : line_offset(0), column_offset(0) {}
@@ -127,11 +123,32 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
     i::MaybeHandle<i::FixedArray> host_defined_options;
   };
 
+  // Create a function that results from wrapping |source| in a function,
+  // with |arguments| being a list of parameters for that function.
+  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetWrappedFunction(
+      Handle<String> source, Handle<FixedArray> arguments,
+      Handle<Context> context, const ScriptDetails& script_details,
+      ScriptOriginOptions origin_options, ScriptData* cached_data,
+      v8::ScriptCompiler::CompileOptions compile_options,
+      v8::ScriptCompiler::NoCacheReason no_cache_reason);
+
+  // Returns true if the embedder permits compiling the given source string in
+  // the given context.
+  static bool CodeGenerationFromStringsAllowed(Isolate* isolate,
+                                               Handle<Context> context,
+                                               Handle<String> source);
+
+  // Create a (bound) function for a String source within a context for eval.
+  V8_WARN_UNUSED_RESULT static MaybeHandle<JSFunction> GetFunctionFromString(
+      Handle<Context> context, Handle<String> source,
+      ParseRestriction restriction, int parameters_end_pos);
+
   // Create a shared function info object for a String source.
   static MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForScript(
-      Handle<String> source, const ScriptDetails& script_details,
-      ScriptOriginOptions origin_options, v8::Extension* extension,
-      ScriptData** cached_data, ScriptCompiler::CompileOptions compile_options,
+      Isolate* isolate, Handle<String> source,
+      const ScriptDetails& script_details, ScriptOriginOptions origin_options,
+      v8::Extension* extension, ScriptData* cached_data,
+      ScriptCompiler::CompileOptions compile_options,
       ScriptCompiler::NoCacheReason no_cache_reason,
       NativesFlag is_natives_code);
 
@@ -141,8 +158,9 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // have been released, however the object itself isn't freed and is still
   // owned by the caller.
   static MaybeHandle<SharedFunctionInfo> GetSharedFunctionInfoForStreamedScript(
-      Handle<String> source, const ScriptDetails& script_details,
-      ScriptOriginOptions origin_options, ScriptStreamingData* streaming_data);
+      Isolate* isolate, Handle<String> source,
+      const ScriptDetails& script_details, ScriptOriginOptions origin_options,
+      ScriptStreamingData* streaming_data);
 
   // Create a shared function info object for the given function literal
   // node (the code may be lazily compiled).
@@ -160,20 +178,13 @@ class V8_EXPORT_PRIVATE Compiler : public AllStatic {
   // instead of generating JIT code for a function at all.
 
   // Generate and return optimized code for OSR, or empty handle on failure.
-  MUST_USE_RESULT static MaybeHandle<Code> GetOptimizedCodeForOSR(
+  V8_WARN_UNUSED_RESULT static MaybeHandle<Code> GetOptimizedCodeForOSR(
       Handle<JSFunction> function, BailoutId osr_offset,
       JavaScriptFrame* osr_frame);
 };
 
 // A base class for compilation jobs intended to run concurrent to the main
-// thread. The job is split into three phases which are called in sequence on
-// different threads and with different limitations:
-//  1) PrepareJob:   Runs on main thread. No major limitations.
-//  2) ExecuteJob:   Runs concurrently. No heap allocation or handle derefs.
-//  3) FinalizeJob:  Runs on main thread. No dependency changes.
-//
-// Each of the three phases can either fail or succeed. The current state of
-// the job can be checked using {state()}.
+// thread. The current state of the job can be checked using {state()}.
 class V8_EXPORT_PRIVATE CompilationJob {
  public:
   enum Status { SUCCEEDED, FAILED };
@@ -184,20 +195,112 @@ class V8_EXPORT_PRIVATE CompilationJob {
     kSucceeded,
     kFailed,
   };
-  CompilationJob(uintptr_t stack_limit, ParseInfo* parse_info,
-                 CompilationInfo* compilation_info, const char* compiler_name,
-                 State initial_state = State::kReadyToPrepare);
-  virtual ~CompilationJob() {}
+
+  CompilationJob(uintptr_t stack_limit, State initial_state)
+      : state_(initial_state), stack_limit_(stack_limit) {
+    timer_.Start();
+  }
+  virtual ~CompilationJob() = default;
+
+  void set_stack_limit(uintptr_t stack_limit) { stack_limit_ = stack_limit; }
+  uintptr_t stack_limit() const { return stack_limit_; }
+
+  State state() const { return state_; }
+
+ protected:
+  V8_WARN_UNUSED_RESULT base::TimeDelta ElapsedTime() const {
+    return timer_.Elapsed();
+  }
+
+  V8_WARN_UNUSED_RESULT Status UpdateState(Status status, State next_state) {
+    if (status == SUCCEEDED) {
+      state_ = next_state;
+    } else {
+      state_ = State::kFailed;
+    }
+    return status;
+  }
+
+ private:
+  State state_;
+  uintptr_t stack_limit_;
+  base::ElapsedTimer timer_;
+};
+
+// A base class for unoptimized compilation jobs.
+//
+// The job is split into two phases which are called in sequence on
+// different threads and with different limitations:
+//  1) ExecuteJob:   Runs concurrently. No heap allocation or handle derefs.
+//  2) FinalizeJob:  Runs on main thread. No dependency changes.
+//
+// Either of phases can either fail or succeed.
+class UnoptimizedCompilationJob : public CompilationJob {
+ public:
+  UnoptimizedCompilationJob(intptr_t stack_limit, ParseInfo* parse_info,
+                            UnoptimizedCompilationInfo* compilation_info)
+      : CompilationJob(stack_limit, State::kReadyToExecute),
+        parse_info_(parse_info),
+        compilation_info_(compilation_info) {}
+
+  // Executes the compile job. Can be called on a background thread.
+  V8_WARN_UNUSED_RESULT Status ExecuteJob();
+
+  // Finalizes the compile job. Must be called on the main thread.
+  V8_WARN_UNUSED_RESULT Status
+  FinalizeJob(Handle<SharedFunctionInfo> shared_info, Isolate* isolate);
+
+  void RecordCompilationStats(Isolate* isolate) const;
+  void RecordFunctionCompilation(CodeEventListener::LogEventsAndTags tag,
+                                 Handle<SharedFunctionInfo> shared,
+                                 Isolate* isolate) const;
+
+  ParseInfo* parse_info() const { return parse_info_; }
+  UnoptimizedCompilationInfo* compilation_info() const {
+    return compilation_info_;
+  }
+
+ protected:
+  // Overridden by the actual implementation.
+  virtual Status ExecuteJobImpl() = 0;
+  virtual Status FinalizeJobImpl(Handle<SharedFunctionInfo> shared_info,
+                                 Isolate* isolate) = 0;
+
+ private:
+  ParseInfo* parse_info_;
+  UnoptimizedCompilationInfo* compilation_info_;
+  base::TimeDelta time_taken_to_execute_;
+  base::TimeDelta time_taken_to_finalize_;
+};
+
+// A base class for optimized compilation jobs.
+//
+// The job is split into three phases which are called in sequence on
+// different threads and with different limitations:
+//  1) PrepareJob:   Runs on main thread. No major limitations.
+//  2) ExecuteJob:   Runs concurrently. No heap allocation or handle derefs.
+//  3) FinalizeJob:  Runs on main thread. No dependency changes.
+//
+// Each of the three phases can either fail or succeed.
+class OptimizedCompilationJob : public CompilationJob {
+ public:
+  OptimizedCompilationJob(uintptr_t stack_limit,
+                          OptimizedCompilationInfo* compilation_info,
+                          const char* compiler_name,
+                          State initial_state = State::kReadyToPrepare)
+      : CompilationJob(stack_limit, initial_state),
+        compilation_info_(compilation_info),
+        compiler_name_(compiler_name) {}
 
   // Prepare the compile job. Must be called on the main thread.
-  MUST_USE_RESULT Status PrepareJob(Isolate* isolate);
+  V8_WARN_UNUSED_RESULT Status PrepareJob(Isolate* isolate);
 
   // Executes the compile job. Can be called on a background thread if
   // can_execute_on_background_thread() returns true.
-  MUST_USE_RESULT Status ExecuteJob();
+  V8_WARN_UNUSED_RESULT Status ExecuteJob();
 
   // Finalizes the compile job. Must be called on the main thread.
-  MUST_USE_RESULT Status FinalizeJob(Isolate* isolate);
+  V8_WARN_UNUSED_RESULT Status FinalizeJob(Isolate* isolate);
 
   // Report a transient failure, try again next time. Should only be called on
   // optimization compilation jobs.
@@ -207,18 +310,14 @@ class V8_EXPORT_PRIVATE CompilationJob {
   // Should only be called on optimization compilation jobs.
   Status AbortOptimization(BailoutReason reason);
 
-  void RecordOptimizedCompilationStats() const;
-  void RecordUnoptimizedCompilationStats(Isolate* isolate) const;
+  enum CompilationMode { kConcurrent, kSynchronous };
+  void RecordCompilationStats(CompilationMode mode, Isolate* isolate) const;
   void RecordFunctionCompilation(CodeEventListener::LogEventsAndTags tag,
                                  Isolate* isolate) const;
 
-  void set_stack_limit(uintptr_t stack_limit) { stack_limit_ = stack_limit; }
-  uintptr_t stack_limit() const { return stack_limit_; }
-
-  State state() const { return state_; }
-  ParseInfo* parse_info() const { return parse_info_; }
-  CompilationInfo* compilation_info() const { return compilation_info_; }
-  virtual size_t AllocatedMemory() const { return 0; }
+  OptimizedCompilationInfo* compilation_info() const {
+    return compilation_info_;
+  }
 
  protected:
   // Overridden by the actual implementation.
@@ -227,31 +326,68 @@ class V8_EXPORT_PRIVATE CompilationJob {
   virtual Status FinalizeJobImpl(Isolate* isolate) = 0;
 
  private:
-  // TODO(6409): Remove parse_info once Fullcode and AstGraphBuilder are gone.
-  ParseInfo* parse_info_;
-  CompilationInfo* compilation_info_;
+  OptimizedCompilationInfo* compilation_info_;
   base::TimeDelta time_taken_to_prepare_;
   base::TimeDelta time_taken_to_execute_;
   base::TimeDelta time_taken_to_finalize_;
   const char* compiler_name_;
-  State state_;
-  uintptr_t stack_limit_;
+};
 
-  MUST_USE_RESULT Status UpdateState(Status status, State next_state) {
-    if (status == SUCCEEDED) {
-      state_ = next_state;
-    } else {
-      state_ = State::kFailed;
-    }
-    return status;
+class V8_EXPORT_PRIVATE BackgroundCompileTask {
+ public:
+  // Creates a new task that when run will parse and compile the streamed
+  // script associated with |data| and can be finalized with
+  // Compiler::GetSharedFunctionInfoForStreamedScript.
+  // Note: does not take ownership of |data|.
+  BackgroundCompileTask(ScriptStreamingData* data, Isolate* isolate);
+  ~BackgroundCompileTask();
+
+  // Creates a new task that when run will parse and compile the
+  // |function_literal| and can be finalized with
+  // Compiler::FinalizeBackgroundCompileTask.
+  BackgroundCompileTask(
+      AccountingAllocator* allocator, const ParseInfo* outer_parse_info,
+      const AstRawString* function_name,
+      const FunctionLiteral* function_literal,
+      WorkerThreadRuntimeCallStats* worker_thread_runtime_stats,
+      TimedHistogram* timer, int max_stack_size);
+
+  void Run();
+
+  ParseInfo* info() { return info_.get(); }
+  Parser* parser() { return parser_.get(); }
+  UnoptimizedCompilationJob* outer_function_job() {
+    return outer_function_job_.get();
   }
+  UnoptimizedCompilationJobList* inner_function_jobs() {
+    return &inner_function_jobs_;
+  }
+
+ private:
+  // Data needed for parsing, and data needed to to be passed between thread
+  // between parsing and compilation. These need to be initialized before the
+  // compilation starts.
+  std::unique_ptr<ParseInfo> info_;
+  std::unique_ptr<Parser> parser_;
+
+  // Data needed for finalizing compilation after background compilation.
+  std::unique_ptr<UnoptimizedCompilationJob> outer_function_job_;
+  UnoptimizedCompilationJobList inner_function_jobs_;
+
+  int stack_size_;
+  WorkerThreadRuntimeCallStats* worker_thread_runtime_call_stats_;
+  AccountingAllocator* allocator_;
+  TimedHistogram* timer_;
+
+  DISALLOW_COPY_AND_ASSIGN(BackgroundCompileTask);
 };
 
 // Contains all data which needs to be transmitted between threads for
 // background parsing and compiling and finalizing it on the main thread.
 struct ScriptStreamingData {
-  ScriptStreamingData(ScriptCompiler::ExternalSourceStream* source_stream,
-                      ScriptCompiler::StreamedSource::Encoding encoding);
+  ScriptStreamingData(
+      std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream,
+      ScriptCompiler::StreamedSource::Encoding encoding);
   ~ScriptStreamingData();
 
   void Release();
@@ -259,18 +395,9 @@ struct ScriptStreamingData {
   // Internal implementation of v8::ScriptCompiler::StreamedSource.
   std::unique_ptr<ScriptCompiler::ExternalSourceStream> source_stream;
   ScriptCompiler::StreamedSource::Encoding encoding;
-  std::unique_ptr<ScriptCompiler::CachedData> cached_data;
 
-  // Data needed for parsing, and data needed to to be passed between thread
-  // between parsing and compilation. These need to be initialized before the
-  // compilation starts.
-  UnicodeCache unicode_cache;
-  std::unique_ptr<ParseInfo> info;
-  std::unique_ptr<Parser> parser;
-
-  // Data needed for finalizing compilation after background compilation.
-  std::unique_ptr<CompilationJob> outer_function_job;
-  CompilationJobList inner_function_jobs;
+  // Task that performs background parsing and compilation.
+  std::unique_ptr<BackgroundCompileTask> task;
 
   DISALLOW_COPY_AND_ASSIGN(ScriptStreamingData);
 };

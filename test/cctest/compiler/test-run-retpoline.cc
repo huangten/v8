@@ -4,6 +4,7 @@
 
 #include "src/assembler-inl.h"
 #include "src/code-stub-assembler.h"
+#include "src/macro-assembler.h"
 
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/code-assembler-tester.h"
@@ -128,6 +129,7 @@ CallDescriptor* CreateDescriptorForStackArguments(Zone* zone,
 void TestHelper(int n, int m, bool tail) {
   HandleAndZoneScope scope;
   Isolate* isolate = scope.main_isolate();
+  CanonicalHandleScope canonical(isolate);
   Zone* zone = scope.main_zone();
   CallDescriptor* caller_descriptor =
       CreateDescriptorForStackArguments(zone, n);

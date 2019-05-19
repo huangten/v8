@@ -171,6 +171,16 @@ void WasmFunctionBuilder::SetAsmFunctionStartPosition(
   last_asm_source_position_ = function_position_u32;
 }
 
+void WasmFunctionBuilder::SetCompilationHint(
+    WasmCompilationHintStrategy strategy, WasmCompilationHintTier baseline,
+    WasmCompilationHintTier top_tier) {
+  uint8_t hint_byte = static_cast<uint8_t>(strategy) |
+                      static_cast<uint8_t>(baseline) << 2 |
+                      static_cast<uint8_t>(top_tier) << 4;
+  DCHECK_NE(hint_byte, kNoCompilationHint);
+  hint_ = hint_byte;
+}
+
 void WasmFunctionBuilder::DeleteCodeAfter(size_t position) {
   DCHECK_LE(position, body_.size());
   body_.Truncate(position);
@@ -249,33 +259,13 @@ void WasmModuleBuilder::AddDataSegment(const byte* data, uint32_t size,
   }
 }
 
-bool WasmModuleBuilder::CompareFunctionSigs::operator()(FunctionSig* a,
-                                                        FunctionSig* b) const {
-  if (a->return_count() < b->return_count()) return true;
-  if (a->return_count() > b->return_count()) return false;
-  if (a->parameter_count() < b->parameter_count()) return true;
-  if (a->parameter_count() > b->parameter_count()) return false;
-  for (size_t r = 0; r < a->return_count(); r++) {
-    if (a->GetReturn(r) < b->GetReturn(r)) return true;
-    if (a->GetReturn(r) > b->GetReturn(r)) return false;
-  }
-  for (size_t p = 0; p < a->parameter_count(); p++) {
-    if (a->GetParam(p) < b->GetParam(p)) return true;
-    if (a->GetParam(p) > b->GetParam(p)) return false;
-  }
-  return false;
-}
-
 uint32_t WasmModuleBuilder::AddSignature(FunctionSig* sig) {
-  SignatureMap::iterator pos = signature_map_.find(sig);
-  if (pos != signature_map_.end()) {
-    return pos->second;
-  } else {
-    uint32_t index = static_cast<uint32_t>(signatures_.size());
-    signature_map_[sig] = index;
-    signatures_.push_back(sig);
-    return index;
-  }
+  auto sig_entry = signature_map_.find(*sig);
+  if (sig_entry != signature_map_.end()) return sig_entry->second;
+  uint32_t index = static_cast<uint32_t>(signatures_.size());
+  signature_map_.emplace(*sig, index);
+  signatures_.push_back(sig);
+  return index;
 }
 
 uint32_t WasmModuleBuilder::AllocateIndirectFunctions(uint32_t count) {
@@ -301,7 +291,7 @@ uint32_t WasmModuleBuilder::AddImport(Vector<const char> name,
 
 uint32_t WasmModuleBuilder::AddGlobalImport(Vector<const char> name,
                                             ValueType type) {
-  global_imports_.push_back({name, WasmOpcodes::ValueTypeCodeFor(type)});
+  global_imports_.push_back({name, ValueTypes::ValueTypeCodeFor(type)});
   return static_cast<uint32_t>(global_imports_.size() - 1);
 }
 
@@ -346,11 +336,11 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
       buffer.write_u8(kWasmFunctionTypeCode);
       buffer.write_size(sig->parameter_count());
       for (auto param : sig->parameters()) {
-        buffer.write_u8(WasmOpcodes::ValueTypeCodeFor(param));
+        buffer.write_u8(ValueTypes::ValueTypeCodeFor(param));
       }
       buffer.write_size(sig->return_count());
       for (auto ret : sig->returns()) {
-        buffer.write_u8(WasmOpcodes::ValueTypeCodeFor(ret));
+        buffer.write_u8(ValueTypes::ValueTypeCodeFor(ret));
       }
     }
     FixupSection(buffer, start);
@@ -381,9 +371,9 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
   if (functions_.size() > 0) {
     size_t start = EmitSection(kFunctionSectionCode, buffer);
     buffer.write_size(functions_.size());
-    for (auto function : functions_) {
+    for (auto* function : functions_) {
       function->WriteSignature(buffer);
-      if (!function->name_.is_empty()) ++num_function_names;
+      if (!function->name_.empty()) ++num_function_names;
     }
     FixupSection(buffer, start);
   }
@@ -392,7 +382,7 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
   if (indirect_functions_.size() > 0) {
     size_t start = EmitSection(kTableSectionCode, buffer);
     buffer.write_u8(1);  // table count
-    buffer.write_u8(kWasmAnyFunctionTypeCode);
+    buffer.write_u8(kLocalAnyFunc);
     buffer.write_u8(kHasMaximumFlag);
     buffer.write_size(indirect_functions_.size());
     buffer.write_size(indirect_functions_.size());
@@ -423,7 +413,7 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
     buffer.write_size(globals_.size());
 
     for (auto global : globals_) {
-      buffer.write_u8(WasmOpcodes::ValueTypeCodeFor(global.type));
+      buffer.write_u8(ValueTypes::ValueTypeCodeFor(global.type));
       buffer.write_u8(global.mutability ? 1 : 0);
       switch (global.init.kind) {
         case WasmInitExpr::kI32Const:
@@ -518,11 +508,37 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
     FixupSection(buffer, start);
   }
 
+  // == emit compilation hints section =========================================
+  bool emit_compilation_hints = false;
+  for (auto* fn : functions_) {
+    if (fn->hint_ != kNoCompilationHint) {
+      emit_compilation_hints = true;
+      break;
+    }
+  }
+  if (emit_compilation_hints) {
+    // Emit the section code.
+    buffer.write_u8(kUnknownSectionCode);
+    // Emit a placeholder for section length.
+    size_t start = buffer.reserve_u32v();
+    // Emit custom section name.
+    buffer.write_string(CStrVector("compilationHints"));
+    // Emit hint count.
+    buffer.write_size(functions_.size());
+    // Emit hint bytes.
+    for (auto* fn : functions_) {
+      uint8_t hint_byte =
+          fn->hint_ != kNoCompilationHint ? fn->hint_ : kDefaultCompilationHint;
+      buffer.write_u8(hint_byte);
+    }
+    FixupSection(buffer, start);
+  }
+
   // == emit code ==============================================================
   if (functions_.size() > 0) {
     size_t start = EmitSection(kCodeSectionCode, buffer);
     buffer.write_size(functions_.size());
-    for (auto function : functions_) {
+    for (auto* function : functions_) {
       function->WriteBody(buffer);
     }
     FixupSection(buffer, start);
@@ -551,8 +567,7 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
     // Emit a placeholder for the length.
     size_t start = buffer.reserve_u32v();
     // Emit the section string.
-    buffer.write_size(4);
-    buffer.write(reinterpret_cast<const byte*>("name"), 4);
+    buffer.write_string(CStrVector("name"));
     // Emit a subsection for the function names.
     buffer.write_u8(NameSectionKindCode::kFunction);
     // Emit a placeholder for the subsection length.
@@ -564,15 +579,15 @@ void WasmModuleBuilder::WriteTo(ZoneBuffer& buffer) const {
     uint32_t function_index = 0;
     for (; function_index < num_imports; ++function_index) {
       const WasmFunctionImport* import = &function_imports_[function_index];
-      DCHECK(!import->name.is_empty());
+      DCHECK(!import->name.empty());
       buffer.write_u32v(function_index);
       buffer.write_string(import->name);
     }
     if (num_function_names > 0) {
-      for (auto function : functions_) {
+      for (auto* function : functions_) {
         DCHECK_EQ(function_index,
                   function->func_index() + function_imports_.size());
-        if (!function->name_.is_empty()) {
+        if (!function->name_.empty()) {
           buffer.write_u32v(function_index);
           buffer.write_string(function->name_);
         }
@@ -588,7 +603,7 @@ void WasmModuleBuilder::WriteAsmJsOffsetTable(ZoneBuffer& buffer) const {
   // == Emit asm.js offset table ===============================================
   buffer.write_size(functions_.size());
   // Emit the offset table per function.
-  for (auto function : functions_) {
+  for (auto* function : functions_) {
     function->WriteAsmWasmOffsetTable(buffer);
   }
   // Append a 0 to indicate that this is an encoded table.

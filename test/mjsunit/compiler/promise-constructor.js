@@ -17,6 +17,7 @@ failWithMessage = (msg) => %AbortJS(msg);
     return {resolve, reject, promise};
   }
 
+  %PrepareFunctionForOptimization(foo);
   foo();
   foo();
   %OptimizeFunctionOnNextCall(foo);
@@ -29,6 +30,7 @@ failWithMessage = (msg) => %AbortJS(msg);
     return new Promise(1);
   }
 
+  %PrepareFunctionForOptimization(foo);
   assertThrows(foo, TypeError);
   assertThrows(foo, TypeError);
   %OptimizeFunctionOnNextCall(foo);
@@ -42,6 +44,7 @@ failWithMessage = (msg) => %AbortJS(msg);
     return new Promise(1);
   }
 
+  %PrepareFunctionForOptimization(foo);
   let threw;
   try {
     threw = false;
@@ -105,6 +108,7 @@ failWithMessage = (msg) => %AbortJS(msg);
     assertInstanceof(p, Promise);
   }
 
+  %PrepareFunctionForOptimization(foo);
   foo();
   foo();
   %OptimizeFunctionOnNextCall(foo);
@@ -129,6 +133,7 @@ failWithMessage = (msg) => %AbortJS(msg);
     assertInstanceof(p, Promise);
   }
 
+  %PrepareFunctionForOptimization(foo);
   foo();
   foo();
   %OptimizeFunctionOnNextCall(foo);
@@ -149,13 +154,42 @@ failWithMessage = (msg) => %AbortJS(msg);
     } catch (e) {
       // The promise constructor should catch the exception and reject the
       // promise instead.
-      // TODO(petermarshall): This fails but should not. We need to fix deopts.
-      // assertUnreachable();
+      assertUnreachable();
     }
-    // TODO(petermarshall): This fails but should not.
-    // assertInstanceof(p, Promise);
+    assertInstanceof(p, Promise);
   }
 
+  %PrepareFunctionForOptimization(foo);
+  foo();
+  foo();
+  %OptimizeFunctionOnNextCall(foo);
+  foo();
+})();
+
+
+// Check that when the promise constructor is marked for lazy deoptimization
+// from below, but not immediatelly deoptimized, and then throws, the deopt continuation
+// catches and calls the reject function instead of propagating the exception.
+(function() {
+  function foo() {
+    let p;
+    try {
+      p = new Promise((resolve, reject) => { bar(); resolve()});
+    } catch (e) {
+       // The promise constructor should catch the exception and reject the
+      // promise instead.
+      assertUnreachable();
+    }
+    assertInstanceof(p, Promise);
+  }
+
+  function bar() {
+    %DeoptimizeFunction(foo);
+    throw new Error();
+  }
+  %NeverOptimizeFunction(bar);
+
+  %PrepareFunctionForOptimization(foo);
   foo();
   foo();
   %OptimizeFunctionOnNextCall(foo);
@@ -172,6 +206,7 @@ failWithMessage = (msg) => %AbortJS(msg);
   function foo() {
     promise = new Promise(bar);
   }
+  %PrepareFunctionForOptimization(foo);
   foo();
   foo();
   %NeverOptimizeFunction(bar);
@@ -191,6 +226,7 @@ failWithMessage = (msg) => %AbortJS(msg);
   function foo() {
     promise = new Promise(bar);
   }
+  %PrepareFunctionForOptimization(foo);
   foo();
   foo();
   %OptimizeFunctionOnNextCall(foo);

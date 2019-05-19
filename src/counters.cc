@@ -8,12 +8,18 @@
 
 #include "src/base/platform/platform.h"
 #include "src/builtins/builtins-definitions.h"
+#include "src/counters-inl.h"
 #include "src/isolate.h"
 #include "src/log-inl.h"
 #include "src/log.h"
+#include "src/ostreams.h"
 
 namespace v8 {
 namespace internal {
+
+std::atomic_uint TracingFlags::runtime_stats{0};
+std::atomic_uint TracingFlags::gc_stats{0};
+std::atomic_uint TracingFlags::ic_stats{0};
 
 StatsTable::StatsTable(Counters* counters)
     : lookup_function_(nullptr),
@@ -34,35 +40,35 @@ StatsCounterThreadSafe::StatsCounterThreadSafe(Counters* counters,
 
 void StatsCounterThreadSafe::Set(int Value) {
   if (ptr_) {
-    base::LockGuard<base::Mutex> Guard(&mutex_);
+    base::MutexGuard Guard(&mutex_);
     SetLoc(ptr_, Value);
   }
 }
 
 void StatsCounterThreadSafe::Increment() {
   if (ptr_) {
-    base::LockGuard<base::Mutex> Guard(&mutex_);
+    base::MutexGuard Guard(&mutex_);
     IncrementLoc(ptr_);
   }
 }
 
 void StatsCounterThreadSafe::Increment(int value) {
   if (ptr_) {
-    base::LockGuard<base::Mutex> Guard(&mutex_);
+    base::MutexGuard Guard(&mutex_);
     IncrementLoc(ptr_, value);
   }
 }
 
 void StatsCounterThreadSafe::Decrement() {
   if (ptr_) {
-    base::LockGuard<base::Mutex> Guard(&mutex_);
+    base::MutexGuard Guard(&mutex_);
     DecrementLoc(ptr_);
   }
 }
 
 void StatsCounterThreadSafe::Decrement(int value) {
   if (ptr_) {
-    base::LockGuard<base::Mutex> Guard(&mutex_);
+    base::MutexGuard Guard(&mutex_);
     DecrementLoc(ptr_, value);
   }
 }
@@ -118,7 +124,8 @@ Counters::Counters(Isolate* isolate)
       STATS_COUNTER_TS_LIST(SC)
 #undef SC
       // clang format on
-      runtime_call_stats_() {
+      runtime_call_stats_(),
+      worker_thread_runtime_call_stats_() {
   static const struct {
     Histogram Counters::*member;
     const char* caption;
@@ -215,31 +222,15 @@ Counters::Counters(Isolate* isolate)
         Histogram(histogram.caption, 1000, 500000, 50, this);
   }
 
-  // For n = 100, low = 4000, high = 2000000: the factor = 1.06.
-  static const struct {
-    Histogram Counters::*member;
-    AggregatedMemoryHistogram<Histogram> Counters::*aggregated;
-    const char* caption;
-  } kMemoryHistograms[] = {
-#define HM(name, caption) \
-  {&Counters::name##_, &Counters::aggregated_##name##_, #caption},
-      HISTOGRAM_MEMORY_LIST(HM)
-#undef HM
-  };
-  for (const auto& histogram : kMemoryHistograms) {
-    this->*histogram.member =
-        Histogram(histogram.caption, 4000, 2000000, 100, this);
-    this->*histogram.aggregated =
-        AggregatedMemoryHistogram<Histogram>(&(this->*histogram.member));
-  }
-
   // clang-format off
   static const struct {
     StatsCounter Counters::*member;
     const char* caption;
   } kStatsCounters[] = {
 #define SC(name, caption) {&Counters::name##_, "c:" #caption},
-      STATS_COUNTER_LIST_1(SC) STATS_COUNTER_LIST_2(SC)
+  STATS_COUNTER_LIST_1(SC)
+  STATS_COUNTER_LIST_2(SC)
+  STATS_COUNTER_NATIVE_CODE_LIST(SC)
 #undef SC
 #define SC(name)                                             \
   {&Counters::count_of_##name##_, "c:" "V8.CountOf_" #name}, \
@@ -273,10 +264,8 @@ void Counters::ResetCounterFunction(CounterLookupCallback f) {
 #define SC(name, caption) name##_.Reset();
   STATS_COUNTER_LIST_1(SC)
   STATS_COUNTER_LIST_2(SC)
-#undef SC
-
-#define SC(name, caption) name##_.Reset();
   STATS_COUNTER_TS_LIST(SC)
+  STATS_COUNTER_NATIVE_CODE_LIST(SC)
 #undef SC
 
 #define SC(name)              \
@@ -323,7 +312,6 @@ void Counters::ResetCreateHistogramFunction(CreateHistogramCallback f) {
 
 #define HM(name, caption) name##_.Reset();
     HISTOGRAM_LEGACY_MEMORY_LIST(HM)
-    HISTOGRAM_MEMORY_LIST(HM)
 #undef HM
 }
 
@@ -501,14 +489,13 @@ void RuntimeCallStats::CorrectCurrentCounterId(
 }
 
 bool RuntimeCallStats::IsCalledOnTheSameThread() {
-  if (!thread_id_.Equals(ThreadId::Invalid()))
-    return thread_id_.Equals(ThreadId::Current());
+  if (thread_id_.IsValid()) return thread_id_ == ThreadId::Current();
   thread_id_ = ThreadId::Current();
   return true;
 }
 
 void RuntimeCallStats::Print() {
-  OFStream os(stdout);
+  StdoutStream os;
   Print(os);
 }
 
@@ -524,7 +511,7 @@ void RuntimeCallStats::Print(std::ostream& os) {
 }
 
 void RuntimeCallStats::Reset() {
-  if (V8_LIKELY(FLAG_runtime_stats == 0)) return;
+  if (V8_LIKELY(!TracingFlags::is_runtime_stats_enabled())) return;
 
   // In tracing, we only what to trace the time spent on top level trace events,
   // if runtime counter stack is not empty, we should clear the whole runtime
@@ -546,6 +533,70 @@ void RuntimeCallStats::Dump(v8::tracing::TracedValue* value) {
     if (GetCounter(i)->count() > 0) GetCounter(i)->Dump(value);
   }
   in_use_ = false;
+}
+
+WorkerThreadRuntimeCallStats::WorkerThreadRuntimeCallStats() {}
+
+WorkerThreadRuntimeCallStats::~WorkerThreadRuntimeCallStats() {
+  if (tls_key_) base::Thread::DeleteThreadLocalKey(*tls_key_);
+}
+
+base::Thread::LocalStorageKey WorkerThreadRuntimeCallStats::GetKey() {
+  DCHECK(TracingFlags::is_runtime_stats_enabled());
+  if (!tls_key_) tls_key_ = base::Thread::CreateThreadLocalKey();
+  return *tls_key_;
+}
+
+RuntimeCallStats* WorkerThreadRuntimeCallStats::NewTable() {
+  DCHECK(TracingFlags::is_runtime_stats_enabled());
+  std::unique_ptr<RuntimeCallStats> new_table =
+      base::make_unique<RuntimeCallStats>();
+  RuntimeCallStats* result = new_table.get();
+
+  base::MutexGuard lock(&mutex_);
+  tables_.push_back(std::move(new_table));
+  return result;
+}
+
+void WorkerThreadRuntimeCallStats::AddToMainTable(
+    RuntimeCallStats* main_call_stats) {
+  base::MutexGuard lock(&mutex_);
+  for (auto& worker_stats : tables_) {
+    DCHECK_NE(main_call_stats, worker_stats.get());
+    main_call_stats->Add(worker_stats.get());
+    worker_stats->Reset();
+  }
+}
+
+WorkerThreadRuntimeCallStatsScope::WorkerThreadRuntimeCallStatsScope(
+    WorkerThreadRuntimeCallStats* worker_stats)
+    : table_(nullptr) {
+  if (V8_LIKELY(!TracingFlags::is_runtime_stats_enabled())) return;
+
+  table_ = reinterpret_cast<RuntimeCallStats*>(
+      base::Thread::GetThreadLocal(worker_stats->GetKey()));
+  if (table_ == nullptr) {
+    table_ = worker_stats->NewTable();
+    base::Thread::SetThreadLocal(worker_stats->GetKey(), table_);
+  }
+
+  if ((TracingFlags::runtime_stats.load(std::memory_order_relaxed) &
+       v8::tracing::TracingCategoryObserver::ENABLED_BY_TRACING)) {
+    table_->Reset();
+  }
+}
+
+WorkerThreadRuntimeCallStatsScope::~WorkerThreadRuntimeCallStatsScope() {
+  if (V8_LIKELY(table_ == nullptr)) return;
+
+  if ((TracingFlags::runtime_stats.load(std::memory_order_relaxed) &
+       v8::tracing::TracingCategoryObserver::ENABLED_BY_TRACING)) {
+    auto value = v8::tracing::TracedValue::Create();
+    table_->Dump(value.get());
+    TRACE_EVENT_INSTANT1(TRACE_DISABLED_BY_DEFAULT("v8.runtime_stats"),
+                         "V8.RuntimeStats", TRACE_EVENT_SCOPE_THREAD,
+                         "runtime-call-stats", std::move(value));
+  }
 }
 
 }  // namespace internal

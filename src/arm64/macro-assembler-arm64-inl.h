@@ -24,17 +24,6 @@ MemOperand FieldMemOperand(Register object, int offset) {
 }
 
 
-MemOperand UntagSmiFieldMemOperand(Register object, int offset) {
-  return UntagSmiMemOperand(object, offset - kHeapObjectTag);
-}
-
-
-MemOperand UntagSmiMemOperand(Register object, int offset) {
-  // Assumes that Smis are shifted by 32 bits and little endianness.
-  STATIC_ASSERT(kSmiShift == 32);
-  return MemOperand(object, offset + (kSmiShift / kBitsPerByte));
-}
-
 void TurboAssembler::And(const Register& rd, const Register& rn,
                          const Operand& operand) {
   DCHECK(allow_macro_instructions());
@@ -297,6 +286,7 @@ void TurboAssembler::Asr(const Register& rd, const Register& rn,
 }
 
 void TurboAssembler::B(Label* label) {
+  DCHECK(allow_macro_instructions());
   b(label);
   CheckVeneerPool(false, false);
 }
@@ -790,18 +780,6 @@ void TurboAssembler::Mneg(const Register& rd, const Register& rn,
   mneg(rd, rn, rm);
 }
 
-void TurboAssembler::Mov(const Register& rd, const Register& rn) {
-  DCHECK(allow_macro_instructions());
-  DCHECK(!rd.IsZero());
-  // Emit a register move only if the registers are distinct, or if they are
-  // not X registers. Note that mov(w0, w0) is not a no-op because it clears
-  // the top word of x0.
-  if (!rd.Is(rn) || !rd.Is64Bits()) {
-    Assembler::mov(rd, rn);
-  }
-}
-
-
 void MacroAssembler::Movk(const Register& rd, uint64_t imm, int shift) {
   DCHECK(allow_macro_instructions());
   DCHECK(!rd.IsZero());
@@ -838,6 +816,12 @@ void TurboAssembler::Rbit(const Register& rd, const Register& rn) {
   DCHECK(allow_macro_instructions());
   DCHECK(!rd.IsZero());
   rbit(rd, rn);
+}
+
+void TurboAssembler::Rev(const Register& rd, const Register& rn) {
+  DCHECK(allow_macro_instructions());
+  DCHECK(!rd.IsZero());
+  rev(rd, rn);
 }
 
 void TurboAssembler::Ret(const Register& xn) {
@@ -1037,49 +1021,55 @@ void TurboAssembler::Uxtw(const Register& rd, const Register& rn) {
 }
 
 void TurboAssembler::InitializeRootRegister() {
-  ExternalReference roots_array_start =
-      ExternalReference::roots_array_start(isolate());
-  Mov(root, Operand(roots_array_start));
+  ExternalReference isolate_root = ExternalReference::isolate_root(isolate());
+  Mov(kRootRegister, Operand(isolate_root));
 }
 
 
 void MacroAssembler::SmiTag(Register dst, Register src) {
-  STATIC_ASSERT(kXRegSizeInBits ==
-                static_cast<unsigned>(kSmiShift + kSmiValueSize));
   DCHECK(dst.Is64Bits() && src.Is64Bits());
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
   Lsl(dst, src, kSmiShift);
 }
-
 
 void MacroAssembler::SmiTag(Register smi) { SmiTag(smi, smi); }
 
 void TurboAssembler::SmiUntag(Register dst, Register src) {
-  STATIC_ASSERT(kXRegSizeInBits ==
-                static_cast<unsigned>(kSmiShift + kSmiValueSize));
   DCHECK(dst.Is64Bits() && src.Is64Bits());
   if (FLAG_enable_slow_asserts) {
     AssertSmi(src);
   }
+  DCHECK(SmiValuesAre32Bits() || SmiValuesAre31Bits());
   Asr(dst, src, kSmiShift);
 }
 
+void TurboAssembler::SmiUntag(Register dst, const MemOperand& src) {
+  DCHECK(dst.Is64Bits());
+  if (SmiValuesAre32Bits()) {
+    if (src.IsImmediateOffset() && src.shift_amount() == 0) {
+      // Load value directly from the upper half-word.
+      // Assumes that Smis are shifted by 32 bits and little endianness.
+      DCHECK_EQ(kSmiShift, 32);
+      Ldrsw(dst,
+            MemOperand(src.base(), src.offset() + (kSmiShift / kBitsPerByte),
+                       src.addrmode()));
+
+    } else {
+      Ldr(dst, src);
+      SmiUntag(dst);
+    }
+  } else {
+    DCHECK(SmiValuesAre31Bits());
+#ifdef V8_COMPRESS_POINTERS
+    Ldrsw(dst, src);
+#else
+    Ldr(dst, src);
+#endif
+    SmiUntag(dst);
+  }
+}
+
 void TurboAssembler::SmiUntag(Register smi) { SmiUntag(smi, smi); }
-
-void MacroAssembler::SmiUntagToDouble(VRegister dst, Register src) {
-  DCHECK(dst.Is64Bits() && src.Is64Bits());
-  if (FLAG_enable_slow_asserts) {
-    AssertSmi(src);
-  }
-  Scvtf(dst, src, kSmiShift);
-}
-
-void MacroAssembler::SmiUntagToFloat(VRegister dst, Register src) {
-  DCHECK(dst.Is32Bits() && src.Is64Bits());
-  if (FLAG_enable_slow_asserts) {
-    AssertSmi(src);
-  }
-  Scvtf(dst, src, kSmiShift);
-}
 
 void TurboAssembler::JumpIfSmi(Register value, Label* smi_label,
                                Label* not_smi_label) {
@@ -1096,6 +1086,15 @@ void TurboAssembler::JumpIfSmi(Register value, Label* smi_label,
   }
 }
 
+void TurboAssembler::JumpIfEqual(Register x, int32_t y, Label* dest) {
+  Cmp(x, y);
+  B(eq, dest);
+}
+
+void TurboAssembler::JumpIfLessThan(Register x, int32_t y, Label* dest) {
+  Cmp(x, y);
+  B(lt, dest);
+}
 
 void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label) {
   JumpIfSmi(value, nullptr, not_smi_label);
@@ -1177,7 +1176,7 @@ void TurboAssembler::Push(Handle<HeapObject> handle) {
   Push(padreg, tmp);
 }
 
-void TurboAssembler::Push(Smi* smi) {
+void TurboAssembler::Push(Smi smi) {
   UseScratchRegisterScope temps(this);
   Register tmp = temps.AcquireX();
   Mov(tmp, Operand(smi));
@@ -1192,7 +1191,13 @@ void TurboAssembler::Claim(int64_t count, uint64_t unit_size) {
     return;
   }
   DCHECK_EQ(size % 16, 0);
-
+#if V8_OS_WIN
+  while (size > kStackPageSize) {
+    Sub(sp, sp, kStackPageSize);
+    Str(xzr, MemOperand(sp));
+    size -= kStackPageSize;
+  }
+#endif
   Sub(sp, sp, size);
 }
 
@@ -1208,22 +1213,33 @@ void TurboAssembler::Claim(const Register& count, uint64_t unit_size) {
   }
   AssertPositiveOrZero(count);
 
+#if V8_OS_WIN
+  // "Functions that allocate 4k or more worth of stack must ensure that each
+  // page prior to the final page is touched in order." Source:
+  // https://docs.microsoft.com/en-us/cpp/build/arm64-windows-abi-conventions?view=vs-2019#stack
+
+  // Callers expect count register to not be clobbered, so copy it.
+  UseScratchRegisterScope temps(this);
+  Register bytes_scratch = temps.AcquireX();
+  Mov(bytes_scratch, size);
+
+  Label check_offset;
+  Label touch_next_page;
+  B(&check_offset);
+  Bind(&touch_next_page);
+  Sub(sp, sp, kStackPageSize);
+  // Just to touch the page, before we increment further.
+  Str(xzr, MemOperand(sp));
+  Sub(bytes_scratch, bytes_scratch, kStackPageSize);
+
+  Bind(&check_offset);
+  Cmp(bytes_scratch, kStackPageSize);
+  B(gt, &touch_next_page);
+
+  Sub(sp, sp, bytes_scratch);
+#else
   Sub(sp, sp, size);
-}
-
-
-void MacroAssembler::ClaimBySMI(const Register& count_smi, uint64_t unit_size) {
-  DCHECK(unit_size == 0 || base::bits::IsPowerOfTwo(unit_size));
-  const int shift = CountTrailingZeros(unit_size, kXRegSizeInBits) - kSmiShift;
-  const Operand size(count_smi,
-                     (shift >= 0) ? (LSL) : (LSR),
-                     (shift >= 0) ? (shift) : (-shift));
-
-  if (size.IsZero()) {
-    return;
-  }
-
-  Sub(sp, sp, size);
+#endif
 }
 
 void TurboAssembler::Drop(int64_t count, uint64_t unit_size) {
@@ -1280,21 +1296,6 @@ void TurboAssembler::DropSlots(int64_t count) {
 }
 
 void TurboAssembler::PushArgument(const Register& arg) { Push(padreg, arg); }
-
-void MacroAssembler::DropBySMI(const Register& count_smi, uint64_t unit_size) {
-  DCHECK(unit_size == 0 || base::bits::IsPowerOfTwo(unit_size));
-  const int shift = CountTrailingZeros(unit_size, kXRegSizeInBits) - kSmiShift;
-  const Operand size(count_smi,
-                     (shift >= 0) ? (LSL) : (LSR),
-                     (shift >= 0) ? (shift) : (-shift));
-
-  if (size.IsZero()) {
-    return;
-  }
-
-  Add(sp, sp, size);
-}
-
 
 void MacroAssembler::CompareAndBranch(const Register& lhs,
                                       const Operand& rhs,

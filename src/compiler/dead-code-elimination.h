@@ -41,7 +41,7 @@ class V8_EXPORT_PRIVATE DeadCodeElimination final
  public:
   DeadCodeElimination(Editor* editor, Graph* graph,
                       CommonOperatorBuilder* common, Zone* temp_zone);
-  ~DeadCodeElimination() final {}
+  ~DeadCodeElimination() final = default;
 
   const char* reducer_name() const override { return "DeadCodeElimination"; }
 
@@ -53,10 +53,11 @@ class V8_EXPORT_PRIVATE DeadCodeElimination final
   Reduction ReduceLoopExit(Node* node);
   Reduction ReduceNode(Node* node);
   Reduction ReducePhi(Node* node);
+  Reduction ReduceEffectPhi(Node* node);
   Reduction ReducePureNode(Node* node);
   Reduction ReduceUnreachableOrIfException(Node* node);
   Reduction ReduceEffectNode(Node* node);
-  Reduction ReduceDeoptimizeOrReturnOrTerminate(Node* node);
+  Reduction ReduceDeoptimizeOrReturnOrTerminateOrTailCall(Node* node);
   Reduction ReduceBranchOrSwitch(Node* node);
 
   Reduction RemoveLoopExit(Node* node);

@@ -22,6 +22,7 @@ namespace wasm {
 #define CASE_I64_OP(name, str) CASE_OP(I64##name, "i64." str)
 #define CASE_F32_OP(name, str) CASE_OP(F32##name, "f32." str)
 #define CASE_F64_OP(name, str) CASE_OP(F64##name, "f64." str)
+#define CASE_REF_OP(name, str) CASE_OP(Ref##name, "ref." str)
 #define CASE_F32x4_OP(name, str) CASE_OP(F32x4##name, "f32x4." str)
 #define CASE_I32x4_OP(name, str) CASE_OP(I32x4##name, "i32x4." str)
 #define CASE_I16x8_OP(name, str) CASE_OP(I16x8##name, "i16x8." str)
@@ -104,15 +105,12 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_FLOAT_OP(Min, "min")
     CASE_FLOAT_OP(Max, "max")
     CASE_FLOAT_OP(CopySign, "copysign")
+    CASE_REF_OP(Null, "null")
+    CASE_REF_OP(IsNull, "is_null")
+    CASE_REF_OP(Func, "func")
     CASE_I32_OP(ConvertI64, "wrap/i64")
     CASE_CONVERT_OP(Convert, INT, F32, "f32", "trunc")
     CASE_CONVERT_OP(Convert, INT, F64, "f64", "trunc")
-    // TODO(kschimpf): Simplify after filling in other saturating operations.
-    CASE_CONVERT_SAT_OP(Convert, I32, F32, "f32", "trunc")
-    CASE_CONVERT_SAT_OP(Convert, I32, F64, "f64", "trunc")
-    CASE_CONVERT_SAT_OP(Convert, I64, F32, "f32", "trunc")
-    CASE_CONVERT_SAT_OP(Convert, I64, F64, "f64", "trunc")
-
     CASE_CONVERT_OP(Convert, I64, I32, "i32", "extend")
     CASE_CONVERT_OP(Convert, F32, I32, "i32", "convert")
     CASE_CONVERT_OP(Convert, F32, I64, "i64", "convert")
@@ -140,6 +138,8 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_OP(Return, "return")
     CASE_OP(CallFunction, "call")
     CASE_OP(CallIndirect, "call_indirect")
+    CASE_OP(ReturnCall, "return_call")
+    CASE_OP(ReturnCallIndirect, "return_call_indirect")
     CASE_OP(Drop, "drop")
     CASE_OP(Select, "select")
     CASE_OP(GetLocal, "get_local")
@@ -147,9 +147,11 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_OP(TeeLocal, "tee_local")
     CASE_OP(GetGlobal, "get_global")
     CASE_OP(SetGlobal, "set_global")
+    CASE_OP(GetTable, "get_table")
+    CASE_OP(SetTable, "set_table")
     CASE_ALL_OP(Const, "const")
-    CASE_OP(MemorySize, "current_memory")
-    CASE_OP(GrowMemory, "grow_memory")
+    CASE_OP(MemorySize, "memory.size")
+    CASE_OP(MemoryGrow, "memory.grow")
     CASE_ALL_OP(LoadMem, "load")
     CASE_SIGN_OP(INT, LoadMem8, "load8")
     CASE_SIGN_OP(INT, LoadMem16, "load16")
@@ -161,12 +163,12 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_I64_OP(StoreMem32, "store32")
     CASE_S128_OP(StoreMem, "store128")
 
-    // Non-standard opcodes.
+    // Exception handling opcodes.
     CASE_OP(Try, "try")
+    CASE_OP(Catch, "catch")
     CASE_OP(Throw, "throw")
     CASE_OP(Rethrow, "rethrow")
-    CASE_OP(Catch, "catch")
-    CASE_OP(CatchAll, "catch_all")
+    CASE_OP(BrOnExn, "br_on_exn")
 
     // asm.js-only opcodes.
     CASE_F64_OP(Acos, "acos")
@@ -194,6 +196,22 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_I32_OP(AsmjsUConvertF32, "asmjs_convert_u/f32")
     CASE_I32_OP(AsmjsSConvertF64, "asmjs_convert_s/f64")
     CASE_I32_OP(AsmjsUConvertF64, "asmjs_convert_u/f64")
+
+    // Numeric Opcodes.
+    CASE_CONVERT_SAT_OP(Convert, I32, F32, "f32", "trunc")
+    CASE_CONVERT_SAT_OP(Convert, I32, F64, "f64", "trunc")
+    CASE_CONVERT_SAT_OP(Convert, I64, F32, "f32", "trunc")
+    CASE_CONVERT_SAT_OP(Convert, I64, F64, "f64", "trunc")
+    CASE_OP(MemoryInit, "memory.init")
+    CASE_OP(DataDrop, "data.drop")
+    CASE_OP(MemoryCopy, "memory.copy")
+    CASE_OP(MemoryFill, "memory.fill")
+    CASE_OP(TableInit, "table.init")
+    CASE_OP(ElemDrop, "elem.drop")
+    CASE_OP(TableCopy, "table.copy")
+    CASE_OP(TableGrow, "table.grow")
+    CASE_OP(TableSize, "table.size")
+    CASE_OP(TableFill, "table.fill")
 
     // SIMD opcodes.
     CASE_SIMD_OP(Splat, "splat")
@@ -253,6 +271,8 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_S1x16_OP(AllTrue, "all_true")
 
     // Atomic operations.
+    CASE_OP(AtomicNotify, "atomic_notify")
+    CASE_INT_OP(AtomicWait, "atomic_wait")
     CASE_UNSIGNED_ALL_OP(AtomicLoad, "atomic_load")
     CASE_UNSIGNED_ALL_OP(AtomicStore, "atomic_store")
     CASE_UNSIGNED_ALL_OP(AtomicAdd, "atomic_add")
@@ -260,8 +280,8 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
     CASE_UNSIGNED_ALL_OP(AtomicAnd, "atomic_and")
     CASE_UNSIGNED_ALL_OP(AtomicOr, "atomic_or")
     CASE_UNSIGNED_ALL_OP(AtomicXor, "atomic_xor")
-    CASE_U32_OP(AtomicExchange, "atomic_xchng")
-    CASE_U32_OP(AtomicCompareExchange, "atomic_cmpxchng")
+    CASE_UNSIGNED_ALL_OP(AtomicExchange, "atomic_xchng")
+    CASE_UNSIGNED_ALL_OP(AtomicCompareExchange, "atomic_cmpxchng")
 
     default : return "unknown";
     // clang-format on
@@ -273,6 +293,7 @@ const char* WasmOpcodes::OpcodeName(WasmOpcode opcode) {
 #undef CASE_I64_OP
 #undef CASE_F32_OP
 #undef CASE_F64_OP
+#undef CASE_REF_OP
 #undef CASE_F32x4_OP
 #undef CASE_I32x4_OP
 #undef CASE_I16x8_OP
@@ -345,24 +366,55 @@ bool WasmOpcodes::IsSignExtensionOpcode(WasmOpcode opcode) {
   }
 }
 
+bool WasmOpcodes::IsAnyRefOpcode(WasmOpcode opcode) {
+  switch (opcode) {
+    case kExprRefNull:
+    case kExprRefIsNull:
+    case kExprRefFunc:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool WasmOpcodes::IsThrowingOpcode(WasmOpcode opcode) {
+  // TODO(8729): Trapping opcodes are not yet considered to be throwing.
+  switch (opcode) {
+    case kExprThrow:
+    case kExprRethrow:
+    case kExprCallFunction:
+    case kExprCallIndirect:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::ostream& operator<<(std::ostream& os, const FunctionSig& sig) {
   if (sig.return_count() == 0) os << "v";
   for (auto ret : sig.returns()) {
-    os << WasmOpcodes::ShortNameOf(ret);
+    os << ValueTypes::ShortNameOf(ret);
   }
   os << "_";
   if (sig.parameter_count() == 0) os << "v";
   for (auto param : sig.parameters()) {
-    os << WasmOpcodes::ShortNameOf(param);
+    os << ValueTypes::ShortNameOf(param);
   }
   return os;
 }
 
-bool IsJSCompatibleSignature(const FunctionSig* sig) {
-  for (auto type : sig->all()) {
-    if (type == wasm::kWasmI64 || type == wasm::kWasmS128) return false;
+bool IsJSCompatibleSignature(const FunctionSig* sig, bool has_bigint_feature) {
+  if (sig->return_count() > 1) {
+    return false;
   }
-  return sig->return_count() <= 1;
+  for (auto type : sig->all()) {
+    if (!has_bigint_feature && type == kWasmI64) {
+      return false;
+    }
+
+    if (type == kWasmS128) return false;
+  }
+  return true;
 }
 
 namespace {
@@ -383,7 +435,7 @@ FOREACH_SIGNATURE(DECLARE_SIG)
 #undef DECLARE_SIG
 
 #define DECLARE_SIG_ENTRY(name, ...) &kSig_##name,
-constexpr const FunctionSig* kSimpleExprSigs[] = {
+constexpr const FunctionSig* kCachedSigs[] = {
     nullptr, FOREACH_SIGNATURE(DECLARE_SIG_ENTRY)};
 #undef DECLARE_SIG_ENTRY
 
@@ -392,10 +444,11 @@ constexpr const FunctionSig* kSimpleExprSigs[] = {
 // encapsulate these constexpr functions in functors.
 // TODO(clemensh): Remove this once we require gcc >= 5.0.
 
-struct GetOpcodeSigIndex {
+struct GetShortOpcodeSigIndex {
   constexpr WasmOpcodeSig operator()(byte opcode) const {
 #define CASE(name, opc, sig) opcode == opc ? kSigEnum_##sig:
-    return FOREACH_SIMPLE_OPCODE(CASE) kSigEnum_None;
+    return FOREACH_SIMPLE_OPCODE(CASE) FOREACH_SIMPLE_PROTOTYPE_OPCODE(CASE)
+        kSigEnum_None;
 #undef CASE
   }
 };
@@ -411,7 +464,8 @@ struct GetAsmJsOpcodeSigIndex {
 struct GetSimdOpcodeSigIndex {
   constexpr WasmOpcodeSig operator()(byte opcode) const {
 #define CASE(name, opc, sig) opcode == (opc & 0xFF) ? kSigEnum_##sig:
-    return FOREACH_SIMD_0_OPERAND_OPCODE(CASE) kSigEnum_None;
+    return FOREACH_SIMD_0_OPERAND_OPCODE(CASE) FOREACH_SIMD_MEM_OPCODE(CASE)
+        kSigEnum_None;
 #undef CASE
   }
 };
@@ -432,8 +486,8 @@ struct GetNumericOpcodeSigIndex {
   }
 };
 
-constexpr std::array<WasmOpcodeSig, 256> kSimpleExprSigTable =
-    base::make_array<256>(GetOpcodeSigIndex{});
+constexpr std::array<WasmOpcodeSig, 256> kShortSigTable =
+    base::make_array<256>(GetShortOpcodeSigIndex{});
 constexpr std::array<WasmOpcodeSig, 256> kSimpleAsmjsExprSigTable =
     base::make_array<256>(GetAsmJsOpcodeSigIndex{});
 constexpr std::array<WasmOpcodeSig, 256> kSimdExprSigTable =
@@ -447,26 +501,27 @@ constexpr std::array<WasmOpcodeSig, 256> kNumericExprSigTable =
 
 FunctionSig* WasmOpcodes::Signature(WasmOpcode opcode) {
   switch (opcode >> 8) {
+    case 0:
+      return const_cast<FunctionSig*>(kCachedSigs[kShortSigTable[opcode]]);
     case kSimdPrefix:
       return const_cast<FunctionSig*>(
-          kSimpleExprSigs[kSimdExprSigTable[opcode & 0xFF]]);
+          kCachedSigs[kSimdExprSigTable[opcode & 0xFF]]);
     case kAtomicPrefix:
       return const_cast<FunctionSig*>(
-          kSimpleExprSigs[kAtomicExprSigTable[opcode & 0xFF]]);
+          kCachedSigs[kAtomicExprSigTable[opcode & 0xFF]]);
     case kNumericPrefix:
       return const_cast<FunctionSig*>(
-          kSimpleExprSigs[kNumericExprSigTable[opcode & 0xFF]]);
+          kCachedSigs[kNumericExprSigTable[opcode & 0xFF]]);
     default:
-      DCHECK_GT(kSimpleExprSigTable.size(), opcode);
-      return const_cast<FunctionSig*>(
-          kSimpleExprSigs[kSimpleExprSigTable[opcode]]);
+      UNREACHABLE();  // invalid prefix.
+      return nullptr;
   }
 }
 
 FunctionSig* WasmOpcodes::AsmjsSignature(WasmOpcode opcode) {
   DCHECK_GT(kSimpleAsmjsExprSigTable.size(), opcode);
   return const_cast<FunctionSig*>(
-      kSimpleExprSigs[kSimpleAsmjsExprSigTable[opcode]]);
+      kCachedSigs[kSimpleAsmjsExprSigTable[opcode]]);
 }
 
 // Define constexpr arrays.
@@ -477,7 +532,7 @@ constexpr uint8_t StoreType::kStoreSizeLog2[];
 constexpr ValueType StoreType::kValueType[];
 constexpr MachineRepresentation StoreType::kMemRep[];
 
-int WasmOpcodes::TrapReasonToMessageId(TrapReason reason) {
+MessageTemplate WasmOpcodes::TrapReasonToMessageId(TrapReason reason) {
   switch (reason) {
 #define TRAPREASON_TO_MESSAGE(name) \
   case k##name:                     \
@@ -490,7 +545,7 @@ int WasmOpcodes::TrapReasonToMessageId(TrapReason reason) {
 }
 
 const char* WasmOpcodes::TrapReasonMessage(TrapReason reason) {
-  return MessageTemplate::TemplateString(TrapReasonToMessageId(reason));
+  return MessageFormatter::TemplateString(TrapReasonToMessageId(reason));
 }
 }  // namespace wasm
 }  // namespace internal

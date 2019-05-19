@@ -4,7 +4,7 @@
 
 #include <limits>
 
-#include "test/unittests/compiler/instruction-selector-unittest.h"
+#include "test/unittests/compiler/backend/instruction-selector-unittest.h"
 
 #include "src/objects-inl.h"
 
@@ -530,10 +530,8 @@ TEST_P(InstructionSelectorDPITest, BranchIfNotZeroWithImmediate) {
   }
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorDPITest,
-                        ::testing::ValuesIn(kDPIs));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest, InstructionSelectorDPITest,
+                         ::testing::ValuesIn(kDPIs));
 
 // -----------------------------------------------------------------------------
 // Data processing instructions with overflow.
@@ -1031,10 +1029,8 @@ TEST_P(InstructionSelectorODPITest, BranchIfNotZeroWithParameters) {
   EXPECT_EQ(kOverflow, s[0]->flags_condition());
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorODPITest,
-                        ::testing::ValuesIn(kODPIs));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest, InstructionSelectorODPITest,
+                         ::testing::ValuesIn(kODPIs));
 
 // -----------------------------------------------------------------------------
 // Shifts.
@@ -1183,12 +1179,12 @@ TEST_P(InstructionSelectorShiftTest, Word32EqualToZeroWithImmediate) {
   }
 }
 
-
-TEST_P(InstructionSelectorShiftTest, Word32NotWithParameters) {
+TEST_P(InstructionSelectorShiftTest, Word32BitwiseNotWithParameters) {
   const Shift shift = GetParam();
   StreamBuilder m(this, MachineType::Int32(), MachineType::Int32(),
                   MachineType::Int32());
-  m.Return(m.Word32Not((m.*shift.constructor)(m.Parameter(0), m.Parameter(1))));
+  m.Return(m.Word32BitwiseNot(
+      (m.*shift.constructor)(m.Parameter(0), m.Parameter(1))));
   Stream s = m.Build();
   ASSERT_EQ(1U, s.size());
   EXPECT_EQ(kArmMvn, s[0]->arch_opcode());
@@ -1197,12 +1193,11 @@ TEST_P(InstructionSelectorShiftTest, Word32NotWithParameters) {
   EXPECT_EQ(1U, s[0]->OutputCount());
 }
 
-
-TEST_P(InstructionSelectorShiftTest, Word32NotWithImmediate) {
+TEST_P(InstructionSelectorShiftTest, Word32BitwiseNotWithImmediate) {
   const Shift shift = GetParam();
   TRACED_FORRANGE(int32_t, imm, shift.i_low, shift.i_high) {
     StreamBuilder m(this, MachineType::Int32(), MachineType::Int32());
-    m.Return(m.Word32Not(
+    m.Return(m.Word32BitwiseNot(
         (m.*shift.constructor)(m.Parameter(0), m.Int32Constant(imm))));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
@@ -1214,13 +1209,14 @@ TEST_P(InstructionSelectorShiftTest, Word32NotWithImmediate) {
   }
 }
 
-
-TEST_P(InstructionSelectorShiftTest, Word32AndWithWord32NotWithParameters) {
+TEST_P(InstructionSelectorShiftTest,
+       Word32AndWithWord32BitwiseNotWithParameters) {
   const Shift shift = GetParam();
   StreamBuilder m(this, MachineType::Int32(), MachineType::Int32(),
                   MachineType::Int32(), MachineType::Int32());
-  m.Return(m.Word32And(m.Parameter(0), m.Word32Not((m.*shift.constructor)(
-                                           m.Parameter(1), m.Parameter(2)))));
+  m.Return(
+      m.Word32And(m.Parameter(0), m.Word32BitwiseNot((m.*shift.constructor)(
+                                      m.Parameter(1), m.Parameter(2)))));
   Stream s = m.Build();
   ASSERT_EQ(1U, s.size());
   EXPECT_EQ(kArmBic, s[0]->arch_opcode());
@@ -1229,14 +1225,14 @@ TEST_P(InstructionSelectorShiftTest, Word32AndWithWord32NotWithParameters) {
   EXPECT_EQ(1U, s[0]->OutputCount());
 }
 
-
-TEST_P(InstructionSelectorShiftTest, Word32AndWithWord32NotWithImmediate) {
+TEST_P(InstructionSelectorShiftTest,
+       Word32AndWithWord32BitwiseNotWithImmediate) {
   const Shift shift = GetParam();
   TRACED_FORRANGE(int32_t, imm, shift.i_low, shift.i_high) {
     StreamBuilder m(this, MachineType::Int32(), MachineType::Int32(),
                     MachineType::Int32());
     m.Return(m.Word32And(m.Parameter(0),
-                         m.Word32Not((m.*shift.constructor)(
+                         m.Word32BitwiseNot((m.*shift.constructor)(
                              m.Parameter(1), m.Int32Constant(imm)))));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
@@ -1248,10 +1244,8 @@ TEST_P(InstructionSelectorShiftTest, Word32AndWithWord32NotWithImmediate) {
   }
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorShiftTest,
-                        ::testing::ValuesIn(kShifts));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest, InstructionSelectorShiftTest,
+                         ::testing::ValuesIn(kShifts));
 
 // -----------------------------------------------------------------------------
 // Memory access instructions.
@@ -1400,10 +1394,9 @@ TEST_P(InstructionSelectorMemoryAccessTest, StoreWithImmediateIndex) {
   }
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
-                        InstructionSelectorMemoryAccessTest,
-                        ::testing::ValuesIn(kMemoryAccesses));
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest,
+                         InstructionSelectorMemoryAccessTest,
+                         ::testing::ValuesIn(kMemoryAccesses));
 
 TEST_F(InstructionSelectorMemoryAccessTest, LoadWithShiftedIndex) {
   TRACED_FORRANGE(int, immediate_shift, 1, 31) {
@@ -1572,11 +1565,9 @@ TEST_P(InstructionSelectorComparisonTest, Word32EqualWithZero) {
   }
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
-                        InstructionSelectorComparisonTest,
-                        ::testing::ValuesIn(kComparisons));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest,
+                         InstructionSelectorComparisonTest,
+                         ::testing::ValuesIn(kComparisons));
 
 // -----------------------------------------------------------------------------
 // Floating point comparisons.
@@ -1659,11 +1650,9 @@ TEST_P(InstructionSelectorF32ComparisonTest, WithImmediateZeroOnLeft) {
   EXPECT_EQ(cmp.commuted_flags_condition, s[0]->flags_condition());
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
-                        InstructionSelectorF32ComparisonTest,
-                        ::testing::ValuesIn(kF32Comparisons));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest,
+                         InstructionSelectorF32ComparisonTest,
+                         ::testing::ValuesIn(kF32Comparisons));
 
 namespace {
 
@@ -1742,11 +1731,9 @@ TEST_P(InstructionSelectorF64ComparisonTest, WithImmediateZeroOnLeft) {
   EXPECT_EQ(cmp.commuted_flags_condition, s[0]->flags_condition());
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
-                        InstructionSelectorF64ComparisonTest,
-                        ::testing::ValuesIn(kF64Comparisons));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest,
+                         InstructionSelectorF64ComparisonTest,
+                         ::testing::ValuesIn(kF64Comparisons));
 
 // -----------------------------------------------------------------------------
 // Floating point arithmetic.
@@ -1774,10 +1761,8 @@ TEST_P(InstructionSelectorFAITest, Parameters) {
   EXPECT_EQ(kFlags_none, s[0]->flags_mode());
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorFAITest,
-                        ::testing::ValuesIn(kFAIs));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest, InstructionSelectorFAITest,
+                         ::testing::ValuesIn(kFAIs));
 
 TEST_F(InstructionSelectorTest, Float32Abs) {
   StreamBuilder m(this, MachineType::Float32(), MachineType::Float32());
@@ -2208,9 +2193,9 @@ TEST_P(InstructionSelectorFlagSettingTest, CommuteShift) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
-                        InstructionSelectorFlagSettingTest,
-                        ::testing::ValuesIn(kFlagSettingInstructions));
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest,
+                         InstructionSelectorFlagSettingTest,
+                         ::testing::ValuesIn(kFlagSettingInstructions));
 
 // -----------------------------------------------------------------------------
 // Miscellaneous.
@@ -2971,12 +2956,11 @@ TEST_F(InstructionSelectorTest, Word32ShrWithWord32AndWithImmediateForARMv7) {
   }
 }
 
-
-TEST_F(InstructionSelectorTest, Word32AndWithWord32Not) {
+TEST_F(InstructionSelectorTest, Word32AndWithWord32BitwiseNot) {
   {
     StreamBuilder m(this, MachineType::Int32(), MachineType::Int32(),
                     MachineType::Int32());
-    m.Return(m.Word32And(m.Parameter(0), m.Word32Not(m.Parameter(1))));
+    m.Return(m.Word32And(m.Parameter(0), m.Word32BitwiseNot(m.Parameter(1))));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
     EXPECT_EQ(kArmBic, s[0]->arch_opcode());
@@ -2987,7 +2971,7 @@ TEST_F(InstructionSelectorTest, Word32AndWithWord32Not) {
   {
     StreamBuilder m(this, MachineType::Int32(), MachineType::Int32(),
                     MachineType::Int32());
-    m.Return(m.Word32And(m.Word32Not(m.Parameter(0)), m.Parameter(1)));
+    m.Return(m.Word32And(m.Word32BitwiseNot(m.Parameter(0)), m.Parameter(1)));
     Stream s = m.Build();
     ASSERT_EQ(1U, s.size());
     EXPECT_EQ(kArmBic, s[0]->arch_opcode());
@@ -3076,10 +3060,9 @@ TEST_F(InstructionSelectorTest, Word32EqualWithZero) {
   }
 }
 
-
-TEST_F(InstructionSelectorTest, Word32NotWithParameter) {
+TEST_F(InstructionSelectorTest, Word32BitwiseNotWithParameter) {
   StreamBuilder m(this, MachineType::Int32(), MachineType::Int32());
-  m.Return(m.Word32Not(m.Parameter(0)));
+  m.Return(m.Word32BitwiseNot(m.Parameter(0)));
   Stream s = m.Build();
   ASSERT_EQ(1U, s.size());
   EXPECT_EQ(kArmMvn, s[0]->arch_opcode());
@@ -3257,13 +3240,52 @@ TEST_F(InstructionSelectorTest, Float64Neg) {
   EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
 }
 
-TEST_F(InstructionSelectorTest, SpeculationFence) {
-  StreamBuilder m(this, MachineType::Int32());
-  m.SpeculationFence();
+TEST_F(InstructionSelectorTest, StackCheck0) {
+  StreamBuilder m(this, MachineType::Int32(), MachineType::Pointer());
+  Node* const sp = m.LoadStackPointer();
+  Node* const stack_limit = m.Load(MachineType::Int32(), m.Parameter(0));
+  Node* const interrupt = m.UintPtrLessThan(sp, stack_limit);
+
+  RawMachineLabel if_true, if_false;
+  m.Branch(interrupt, &if_true, &if_false);
+
+  m.Bind(&if_true);
+  m.Return(m.Int32Constant(1));
+
+  m.Bind(&if_false);
   m.Return(m.Int32Constant(0));
+
   Stream s = m.Build();
-  ASSERT_EQ(1U, s.size());
-  EXPECT_EQ(kArmDsbIsb, s[0]->arch_opcode());
+
+  ASSERT_EQ(2U, s.size());
+  EXPECT_EQ(kArmLdr, s[0]->arch_opcode());
+  EXPECT_EQ(kArmCmp, s[1]->arch_opcode());
+  EXPECT_EQ(4U, s[1]->InputCount());
+  EXPECT_EQ(0U, s[1]->OutputCount());
+}
+
+TEST_F(InstructionSelectorTest, StackCheck1) {
+  StreamBuilder m(this, MachineType::Int32(), MachineType::Pointer());
+  Node* const sp = m.LoadStackPointer();
+  Node* const stack_limit = m.Load(MachineType::Int32(), m.Parameter(0));
+  Node* const sp_within_limit = m.UintPtrLessThan(stack_limit, sp);
+
+  RawMachineLabel if_true, if_false;
+  m.Branch(sp_within_limit, &if_true, &if_false);
+
+  m.Bind(&if_true);
+  m.Return(m.Int32Constant(1));
+
+  m.Bind(&if_false);
+  m.Return(m.Int32Constant(0));
+
+  Stream s = m.Build();
+
+  ASSERT_EQ(2U, s.size());
+  EXPECT_EQ(kArmLdr, s[0]->arch_opcode());
+  EXPECT_EQ(kArmCmp, s[1]->arch_opcode());
+  EXPECT_EQ(4U, s[1]->InputCount());
+  EXPECT_EQ(0U, s[1]->OutputCount());
 }
 
 }  // namespace compiler

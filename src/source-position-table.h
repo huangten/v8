@@ -33,7 +33,16 @@ struct PositionTableEntry {
 
 class V8_EXPORT_PRIVATE SourcePositionTableBuilder {
  public:
-  enum RecordingMode { OMIT_SOURCE_POSITIONS, RECORD_SOURCE_POSITIONS };
+  enum RecordingMode {
+    // Indicates that source positions are never to be generated. (Resulting in
+    // an empty table).
+    OMIT_SOURCE_POSITIONS,
+    // Indicates that source positions are not currently required, but may be
+    // generated later.
+    LAZY_SOURCE_POSITIONS,
+    // Indicates that source positions should be immediately generated.
+    RECORD_SOURCE_POSITIONS
+  };
 
   explicit SourcePositionTableBuilder(
       RecordingMode mode = RECORD_SOURCE_POSITIONS);
@@ -42,11 +51,13 @@ class V8_EXPORT_PRIVATE SourcePositionTableBuilder {
                    bool is_statement);
 
   Handle<ByteArray> ToSourcePositionTable(Isolate* isolate);
+  OwnedVector<byte> ToSourcePositionTableVector();
+
+  inline bool Omit() const { return mode_ != RECORD_SOURCE_POSITIONS; }
+  inline bool Lazy() const { return mode_ == LAZY_SOURCE_POSITIONS; }
 
  private:
   void AddEntry(const PositionTableEntry& entry);
-
-  inline bool Omit() const { return mode_ == OMIT_SOURCE_POSITIONS; }
 
   RecordingMode mode_;
   std::vector<byte> bytes_;
@@ -58,23 +69,33 @@ class V8_EXPORT_PRIVATE SourcePositionTableBuilder {
 
 class V8_EXPORT_PRIVATE SourcePositionTableIterator {
  public:
+  enum IterationFilter { kJavaScriptOnly = 0, kExternalOnly = 1, kAll = 2 };
+
   // Used for saving/restoring the iterator.
-  struct IndexAndPosition {
+  struct IndexAndPositionState {
     int index_;
     PositionTableEntry position_;
+    IterationFilter filter_;
   };
 
-  // We expose two flavours of the iterator, depending on the argument passed
+  // We expose three flavours of the iterator, depending on the argument passed
   // to the constructor:
 
   // Handlified iterator allows allocation, but it needs a handle (and thus
   // a handle scope). This is the preferred version.
-  explicit SourcePositionTableIterator(Handle<ByteArray> byte_array);
+  explicit SourcePositionTableIterator(
+      Handle<ByteArray> byte_array, IterationFilter filter = kJavaScriptOnly);
 
   // Non-handlified iterator does not need a handle scope, but it disallows
   // allocation during its lifetime. This is useful if there is no handle
   // scope around.
-  explicit SourcePositionTableIterator(ByteArray* byte_array);
+  explicit SourcePositionTableIterator(
+      ByteArray byte_array, IterationFilter filter = kJavaScriptOnly);
+
+  // Handle-safe iterator based on an a vector located outside the garbage
+  // collected heap, allows allocation during its lifetime.
+  explicit SourcePositionTableIterator(
+      Vector<const byte> bytes, IterationFilter filter = kJavaScriptOnly);
 
   void Advance();
 
@@ -92,21 +113,23 @@ class V8_EXPORT_PRIVATE SourcePositionTableIterator {
   }
   bool done() const { return index_ == kDone; }
 
-  IndexAndPosition GetState() const { return {index_, current_}; }
+  IndexAndPositionState GetState() const { return {index_, current_, filter_}; }
 
-  void RestoreState(const IndexAndPosition& saved_state) {
+  void RestoreState(const IndexAndPositionState& saved_state) {
     index_ = saved_state.index_;
     current_ = saved_state.position_;
+    filter_ = saved_state.filter_;
   }
 
  private:
   static const int kDone = -1;
 
-  ByteArray* raw_table_ = nullptr;
+  Vector<const byte> raw_table_;
   Handle<ByteArray> table_;
   int index_ = 0;
   PositionTableEntry current_;
-  DisallowHeapAllocation no_gc;
+  IterationFilter filter_;
+  DISALLOW_HEAP_ALLOCATION(no_gc)
 };
 
 }  // namespace internal

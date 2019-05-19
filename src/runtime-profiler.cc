@@ -6,14 +6,14 @@
 
 #include "src/assembler.h"
 #include "src/base/platform/platform.h"
-#include "src/bootstrapper.h"
-#include "src/code-stubs.h"
 #include "src/compilation-cache.h"
 #include "src/compiler.h"
 #include "src/execution.h"
 #include "src/frames-inl.h"
 #include "src/global-handles.h"
+#include "src/init/bootstrapper.h"
 #include "src/interpreter/interpreter.h"
+#include "src/tracing/trace-event.h"
 
 namespace v8 {
 namespace internal {
@@ -35,9 +35,6 @@ static const int kOSRBytecodeSizeAllowancePerTick = 48;
 // Maximum size in bytes of generated code for a function to be optimized
 // the very first time it is seen on the stack.
 static const int kMaxBytecodeSizeForEarlyOpt = 90;
-
-// Certain functions are simply too big to be worth optimizing.
-static const int kMaxBytecodeSizeForOpt = 60 * KB;
 
 #define OPTIMIZATION_REASON_LIST(V)                            \
   V(DoNotOptimize, "do not optimize")                          \
@@ -70,53 +67,27 @@ RuntimeProfiler::RuntimeProfiler(Isolate* isolate)
       any_ic_changed_(false) {
 }
 
-static void GetICCounts(JSFunction* function, int* ic_with_type_info_count,
-                        int* ic_generic_count, int* ic_total_count,
-                        int* type_info_percentage, int* generic_percentage) {
-  // Harvest vector-ics.
-  FeedbackVector* vector = function->feedback_vector();
-  vector->ComputeCounts(ic_with_type_info_count, ic_generic_count,
-                        ic_total_count);
-
-  if (*ic_total_count > 0) {
-    *type_info_percentage = 100 * *ic_with_type_info_count / *ic_total_count;
-    *generic_percentage = 100 * *ic_generic_count / *ic_total_count;
-  } else {
-    *type_info_percentage = 100;  // Compared against lower bound.
-    *generic_percentage = 0;      // Compared against upper bound.
-  }
-}
-
-static void TraceRecompile(JSFunction* function, const char* reason,
+static void TraceRecompile(JSFunction function, const char* reason,
                            const char* type) {
   if (FLAG_trace_opt) {
     PrintF("[marking ");
     function->ShortPrint();
     PrintF(" for %s recompilation, reason: %s", type, reason);
-    if (FLAG_type_info_threshold > 0) {
-      int typeinfo, generic, total, type_percentage, generic_percentage;
-      GetICCounts(function, &typeinfo, &generic, &total, &type_percentage,
-                  &generic_percentage);
-      PrintF(", ICs with typeinfo: %d/%d (%d%%)", typeinfo, total,
-             type_percentage);
-      PrintF(", generic ICs: %d/%d (%d%%)", generic, total, generic_percentage);
-    }
     PrintF("]\n");
   }
 }
 
-void RuntimeProfiler::Optimize(JSFunction* function,
-                               OptimizationReason reason) {
+void RuntimeProfiler::Optimize(JSFunction function, OptimizationReason reason) {
   DCHECK_NE(reason, OptimizationReason::kDoNotOptimize);
   TraceRecompile(function, OptimizationReasonToString(reason), "optimized");
   function->MarkForOptimization(ConcurrencyMode::kConcurrent);
 }
 
-void RuntimeProfiler::AttemptOnStackReplacement(JavaScriptFrame* frame,
+void RuntimeProfiler::AttemptOnStackReplacement(InterpretedFrame* frame,
                                                 int loop_nesting_levels) {
-  JSFunction* function = frame->function();
-  SharedFunctionInfo* shared = function->shared();
-  if (!FLAG_use_osr || !function->shared()->IsUserJavaScript()) {
+  JSFunction function = frame->function();
+  SharedFunctionInfo shared = function->shared();
+  if (!FLAG_use_osr || !shared->IsUserJavaScript()) {
     return;
   }
 
@@ -133,14 +104,13 @@ void RuntimeProfiler::AttemptOnStackReplacement(JavaScriptFrame* frame,
   }
 
   DCHECK_EQ(StackFrame::INTERPRETED, frame->type());
-  DCHECK(shared->HasBytecodeArray());
-  int level = shared->bytecode_array()->osr_loop_nesting_level();
-  shared->bytecode_array()->set_osr_loop_nesting_level(
+  int level = frame->GetBytecodeArray()->osr_loop_nesting_level();
+  frame->GetBytecodeArray()->set_osr_loop_nesting_level(
       Min(level + loop_nesting_levels, AbstractCode::kMaxLoopNestingMarker));
 }
 
-void RuntimeProfiler::MaybeOptimize(JSFunction* function,
-                                    JavaScriptFrame* frame) {
+void RuntimeProfiler::MaybeOptimize(JSFunction function,
+                                    InterpretedFrame* frame) {
   if (function->IsInOptimizationQueue()) {
     if (FLAG_trace_opt_verbose) {
       PrintF("[function ");
@@ -159,32 +129,28 @@ void RuntimeProfiler::MaybeOptimize(JSFunction* function,
 
   if (function->shared()->optimization_disabled()) return;
 
-  if (frame->is_optimized()) return;
-
-  OptimizationReason reason = ShouldOptimize(function, frame);
+  OptimizationReason reason =
+      ShouldOptimize(function, function->shared()->GetBytecodeArray());
 
   if (reason != OptimizationReason::kDoNotOptimize) {
     Optimize(function, reason);
   }
 }
 
-bool RuntimeProfiler::MaybeOSR(JSFunction* function, JavaScriptFrame* frame) {
-  SharedFunctionInfo* shared = function->shared();
+bool RuntimeProfiler::MaybeOSR(JSFunction function, InterpretedFrame* frame) {
   int ticks = function->feedback_vector()->profiler_ticks();
-
   // TODO(rmcilroy): Also ensure we only OSR top-level code if it is smaller
   // than kMaxToplevelSourceSize.
 
-  if (!frame->is_optimized() &&
-      (function->IsMarkedForOptimization() ||
-       function->IsMarkedForConcurrentOptimization() ||
-       function->HasOptimizedCode())) {
+  if (function->IsMarkedForOptimization() ||
+      function->IsMarkedForConcurrentOptimization() ||
+      function->HasOptimizedCode()) {
     // Attempt OSR if we are still running interpreted code even though the
     // the function has long been marked or even already been optimized.
     int64_t allowance =
         kOSRBytecodeSizeAllowanceBase +
         static_cast<int64_t>(ticks) * kOSRBytecodeSizeAllowancePerTick;
-    if (shared->bytecode_array()->length() <= allowance) {
+    if (function->shared()->GetBytecodeArray()->length() <= allowance) {
       AttemptOnStackReplacement(frame);
     }
     return true;
@@ -192,22 +158,16 @@ bool RuntimeProfiler::MaybeOSR(JSFunction* function, JavaScriptFrame* frame) {
   return false;
 }
 
-OptimizationReason RuntimeProfiler::ShouldOptimize(JSFunction* function,
-                                                   JavaScriptFrame* frame) {
-  SharedFunctionInfo* shared = function->shared();
+OptimizationReason RuntimeProfiler::ShouldOptimize(JSFunction function,
+                                                   BytecodeArray bytecode) {
   int ticks = function->feedback_vector()->profiler_ticks();
-
-  if (shared->bytecode_array()->length() > kMaxBytecodeSizeForOpt) {
-    return OptimizationReason::kDoNotOptimize;
-  }
-
   int ticks_for_optimization =
       kProfilerTicksBeforeOptimization +
-      (shared->bytecode_array()->length() / kBytecodeSizeAllowancePerTick);
+      (bytecode->length() / kBytecodeSizeAllowancePerTick);
   if (ticks >= ticks_for_optimization) {
     return OptimizationReason::kHotAndStable;
   } else if (!any_ic_changed_ &&
-             shared->bytecode_array()->length() < kMaxBytecodeSizeForEarlyOpt) {
+             bytecode->length() < kMaxBytecodeSizeForEarlyOpt) {
     // If no IC was patched since the last tick and this function is very
     // small, optimistically optimize it now.
     return OptimizationReason::kSmallFunction;
@@ -220,7 +180,7 @@ OptimizationReason RuntimeProfiler::ShouldOptimize(JSFunction* function,
       PrintF("ICs changed]\n");
     } else {
       PrintF(" too large for small function optimization: %d/%d]\n",
-             shared->bytecode_array()->length(), kMaxBytecodeSizeForEarlyOpt);
+             bytecode->length(), kMaxBytecodeSizeForEarlyOpt);
     }
   }
   return OptimizationReason::kDoNotOptimize;
@@ -232,6 +192,8 @@ void RuntimeProfiler::MarkCandidatesForOptimization() {
   if (!isolate_->use_optimizer()) return;
 
   DisallowHeapAllocation no_gc;
+  TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("v8.compile"),
+               "V8.MarkCandidatesForOptimization");
 
   // Run through the JavaScript frames and collect them. If we already
   // have a sample of the function, we mark it for optimizations
@@ -242,13 +204,15 @@ void RuntimeProfiler::MarkCandidatesForOptimization() {
        frame_count++ < frame_count_limit && !it.done();
        it.Advance()) {
     JavaScriptFrame* frame = it.frame();
-    if (frame->is_optimized()) continue;
+    if (!frame->is_interpreted()) continue;
 
-    JSFunction* function = frame->function();
+    JSFunction function = frame->function();
     DCHECK(function->shared()->is_compiled());
     if (!function->shared()->IsInterpreted()) continue;
 
-    MaybeOptimize(function, frame);
+    if (!function->has_feedback_vector()) continue;
+
+    MaybeOptimize(function, InterpretedFrame::cast(frame));
 
     // TODO(leszeks): Move this increment to before the maybe optimize checks,
     // and update the tests to assume the increment has already happened.

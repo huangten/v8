@@ -34,12 +34,10 @@
 #include "src/disasm.h"
 #include "src/macro-assembler.h"
 #include "src/ppc/constants-ppc.h"
-
+#include "src/register-configuration.h"
 
 namespace v8 {
 namespace internal {
-
-const auto GetRegConfig = RegisterConfiguration::Default;
 
 //------------------------------------------------------------------------------
 
@@ -120,7 +118,7 @@ void Decoder::PrintRegister(int reg) {
 
 // Print the double FP register name according to the active name converter.
 void Decoder::PrintDRegister(int reg) {
-  Print(GetRegConfig()->GetDoubleRegisterName(reg));
+  Print(RegisterName(DoubleRegister::from_code(reg)));
 }
 
 
@@ -320,7 +318,6 @@ int Decoder::FormatOption(Instruction* instr, const char* format) {
 #endif
     default: {
       UNREACHABLE();
-      break;
     }
   }
 
@@ -665,6 +662,10 @@ void Decoder::DecodeExt2(Instruction* instr) {
       Format(instr, "stwcx   'rs, 'ra, 'rb");
       return;
     }
+    case STDCX: {
+      Format(instr, "stdcx   'rs, 'ra, 'rb");
+      return;
+    }
   }
 
   // ?? are all of these xo_form?
@@ -896,6 +897,10 @@ void Decoder::DecodeExt2(Instruction* instr) {
     }
     case LDUX: {
       Format(instr, "ldux    'rt, 'ra, 'rb");
+      return;
+    }
+    case LDARX: {
+      Format(instr, "ldarx   'rt, 'ra, 'rb");
       return;
     }
     case STDX: {
@@ -1157,7 +1162,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
     // The first field will be identified as a jump table entry.  We
     // emit the rest of the structure as zero, so just skip past them.
     Format(instr, "constant");
-    return Instruction::kInstrSize;
+    return kInstrSize;
   }
 
   uint32_t opcode = instr->OpcodeValue() << 26;
@@ -1466,7 +1471,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
     }
   }
 
-  return Instruction::kInstrSize;
+  return kInstrSize;
 }
 }  // namespace internal
 }  // namespace v8
@@ -1479,7 +1484,7 @@ namespace disasm {
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
   v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
-  return tmp_buffer_.start();
+  return tmp_buffer_.begin();
 }
 
 
@@ -1489,18 +1494,16 @@ const char* NameConverter::NameOfConstant(byte* addr) const {
 
 
 const char* NameConverter::NameOfCPURegister(int reg) const {
-  return v8::internal::GetRegConfig()->GetGeneralRegisterName(reg);
+  return RegisterName(i::Register::from_code(reg));
 }
 
 const char* NameConverter::NameOfByteCPURegister(int reg) const {
   UNREACHABLE();  // PPC does not have the concept of a byte register
-  return "nobytereg";
 }
 
 
 const char* NameConverter::NameOfXMMRegister(int reg) const {
   UNREACHABLE();  // PPC does not have any XMM registers
-  return "noxmmreg";
 }
 
 const char* NameConverter::NameInCode(byte* addr) const {
@@ -1512,13 +1515,6 @@ const char* NameConverter::NameInCode(byte* addr) const {
 
 //------------------------------------------------------------------------------
 
-Disassembler::Disassembler(const NameConverter& converter)
-    : converter_(converter) {}
-
-
-Disassembler::~Disassembler() {}
-
-
 int Disassembler::InstructionDecode(v8::internal::Vector<char> buffer,
                                     byte* instruction) {
   v8::internal::Decoder d(converter_, buffer);
@@ -1529,17 +1525,17 @@ int Disassembler::InstructionDecode(v8::internal::Vector<char> buffer,
 // The PPC assembler does not currently use constant pools.
 int Disassembler::ConstantPoolSizeAt(byte* instruction) { return -1; }
 
-
-void Disassembler::Disassemble(FILE* f, byte* begin, byte* end) {
+void Disassembler::Disassemble(FILE* f, byte* begin, byte* end,
+                               UnimplementedOpcodeAction unimplemented_action) {
   NameConverter converter;
-  Disassembler d(converter);
+  Disassembler d(converter, unimplemented_action);
   for (byte* pc = begin; pc < end;) {
     v8::internal::EmbeddedVector<char, 128> buffer;
     buffer[0] = '\0';
     byte* prev_pc = pc;
     pc += d.InstructionDecode(buffer, pc);
     v8::internal::PrintF(f, "%p    %08x      %s\n", static_cast<void*>(prev_pc),
-                         *reinterpret_cast<int32_t*>(prev_pc), buffer.start());
+                         *reinterpret_cast<int32_t*>(prev_pc), buffer.begin());
   }
 }
 

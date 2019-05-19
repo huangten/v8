@@ -556,7 +556,6 @@ void Decoder::PrintFormat(Instruction* instr) {
       break;
     default:
       UNREACHABLE();
-      break;
   }
   PrintChar(formatLetter);
 }
@@ -1546,6 +1545,16 @@ void Decoder::DecodeTypeRegisterSPECIAL3(Instruction* instr) {
           }
           break;
         }
+        case LL_R6: {
+          DCHECK(IsMipsArchVariant(kMips32r6));
+          Format(instr, "llwp    'rd, 'rt, 0('rs)");
+          break;
+        }
+        case SC_R6: {
+          DCHECK(IsMipsArchVariant(kMips32r6));
+          Format(instr, "scwp    'rd, 'rt, 0('rs)");
+          break;
+        }
         default: {
           sa >>= kBp2Bits;
           switch (sa) {
@@ -1676,7 +1685,11 @@ void Decoder::DecodeTypeImmediateSPECIAL3(Instruction* instr) {
   switch (instr->FunctionFieldRaw()) {
     case LL_R6: {
       if (IsMipsArchVariant(kMips32r6)) {
-        Format(instr, "ll     'rt, 'imm9s('rs)");
+        if (instr->Bit(6)) {
+          Format(instr, "llx     'rt, 'imm9s('rs)");
+        } else {
+          Format(instr, "ll      'rt, 'imm9s('rs)");
+        }
       } else {
         Unknown(instr);
       }
@@ -1684,7 +1697,11 @@ void Decoder::DecodeTypeImmediateSPECIAL3(Instruction* instr) {
     }
     case SC_R6: {
       if (IsMipsArchVariant(kMips32r6)) {
-        Format(instr, "sc     'rt, 'imm9s('rs)");
+        if (instr->Bit(6)) {
+          Format(instr, "scx     'rt, 'imm9s('rs)");
+        } else {
+          Format(instr, "sc      'rt, 'imm9s('rs)");
+        }
       } else {
         Unknown(instr);
       }
@@ -1738,7 +1755,11 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
           Format(instr, "bltz    'rs, 'imm16u -> 'imm16p4s2");
           break;
         case BLTZAL:
-          Format(instr, "bltzal  'rs, 'imm16u -> 'imm16p4s2");
+          if (instr->RsValue() == 0) {
+            Format(instr, "nal");
+          } else {
+            Format(instr, "bltzal  'rs, 'imm16u -> 'imm16p4s2");
+          }
           break;
         case BGEZ:
           Format(instr, "bgez    'rs, 'imm16u -> 'imm16p4s2");
@@ -1948,14 +1969,14 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
       if (IsMipsArchVariant(kMips32r6)) {
         Unknown(instr);
       } else {
-        Format(instr, "ll     'rt, 'imm16s('rs)");
+        Format(instr, "ll      'rt, 'imm16s('rs)");
       }
       break;
     case SC:
       if (IsMipsArchVariant(kMips32r6)) {
         Unknown(instr);
       } else {
-        Format(instr, "sc     'rt, 'imm16s('rs)");
+        Format(instr, "sc      'rt, 'imm16s('rs)");
       }
       break;
     case LWC1:
@@ -2030,7 +2051,6 @@ void Decoder::DecodeTypeImmediate(Instruction* instr) {
     default:
       printf("a 0x%x \n", instr->OpcodeFieldRaw());
       UNREACHABLE();
-      break;
   }
 }
 
@@ -2704,7 +2724,7 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
       UNSUPPORTED_MIPS();
     }
   }
-  return Instruction::kInstrSize;
+  return kInstrSize;
 }
 
 
@@ -2718,7 +2738,7 @@ namespace disasm {
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
   v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
-  return tmp_buffer_.start();
+  return tmp_buffer_.begin();
 }
 
 
@@ -2752,13 +2772,6 @@ const char* NameConverter::NameInCode(byte* addr) const {
 
 //------------------------------------------------------------------------------
 
-Disassembler::Disassembler(const NameConverter& converter)
-    : converter_(converter) {}
-
-
-Disassembler::~Disassembler() {}
-
-
 int Disassembler::InstructionDecode(v8::internal::Vector<char> buffer,
                                     byte* instruction) {
   v8::internal::Decoder d(converter_, buffer);
@@ -2771,17 +2784,17 @@ int Disassembler::ConstantPoolSizeAt(byte* instruction) {
   return -1;
 }
 
-
-void Disassembler::Disassemble(FILE* f, byte* begin, byte* end) {
+void Disassembler::Disassemble(FILE* f, byte* begin, byte* end,
+                               UnimplementedOpcodeAction unimplemented_action) {
   NameConverter converter;
-  Disassembler d(converter);
+  Disassembler d(converter, unimplemented_action);
   for (byte* pc = begin; pc < end;) {
     v8::internal::EmbeddedVector<char, 128> buffer;
     buffer[0] = '\0';
     byte* prev_pc = pc;
     pc += d.InstructionDecode(buffer, pc);
     v8::internal::PrintF(f, "%p    %08x      %s\n", static_cast<void*>(prev_pc),
-                         *reinterpret_cast<int32_t*>(prev_pc), buffer.start());
+                         *reinterpret_cast<int32_t*>(prev_pc), buffer.begin());
   }
 }
 

@@ -7,8 +7,8 @@
 
 #include <type_traits>
 
-#include "src/assembler.h"
 #include "src/globals.h"
+#include "src/isolate.h"
 
 #if defined(USE_SIMULATOR)
 
@@ -24,9 +24,6 @@ class SimulatorBase {
   static void InitializeOncePerProcess();
   static void GlobalTearDown();
 
-  // Call on isolate initialization.
-  static void Initialize(Isolate* isolate);
-
   static base::Mutex* redirection_mutex() { return redirection_mutex_; }
   static Redirection* redirection() { return redirection_; }
   static void set_redirection(Redirection* r) { redirection_ = r; }
@@ -34,9 +31,13 @@ class SimulatorBase {
   static base::Mutex* i_cache_mutex() { return i_cache_mutex_; }
   static base::CustomMatcherHashMap* i_cache() { return i_cache_; }
 
+  // Runtime call support.
+  static Address RedirectExternalReference(Address external_function,
+                                           ExternalReference::Type type);
+
  protected:
   template <typename Return, typename SimT, typename CallImpl, typename... Args>
-  static Return VariadicCall(SimT* sim, CallImpl call, byte* entry,
+  static Return VariadicCall(SimT* sim, CallImpl call, Address entry,
                              Args... args) {
     // Convert all arguments to intptr_t. Fails if any argument is not integral
     // or pointer.
@@ -45,11 +46,33 @@ class SimulatorBase {
     return ConvertReturn<Return>(ret);
   }
 
- private:
-  // Runtime call support.
-  static void* RedirectExternalReference(void* external_function,
-                                         ExternalReference::Type type);
+  // Convert back integral return types. This is always a narrowing conversion.
+  template <typename T>
+  static typename std::enable_if<std::is_integral<T>::value, T>::type
+  ConvertReturn(intptr_t ret) {
+    static_assert(sizeof(T) <= sizeof(intptr_t), "type bigger than ptrsize");
+    return static_cast<T>(ret);
+  }
 
+  // Convert back pointer-typed return types.
+  template <typename T>
+  static typename std::enable_if<std::is_pointer<T>::value, T>::type
+  ConvertReturn(intptr_t ret) {
+    return reinterpret_cast<T>(ret);
+  }
+
+  template <typename T>
+  static typename std::enable_if<std::is_base_of<Object, T>::value, T>::type
+  ConvertReturn(intptr_t ret) {
+    return Object(ret);
+  }
+
+  // Convert back void return type (i.e. no return).
+  template <typename T>
+  static typename std::enable_if<std::is_void<T>::value, T>::type ConvertReturn(
+      intptr_t ret) {}
+
+ private:
   static base::Mutex* redirection_mutex_;
   static Redirection* redirection_;
 
@@ -82,26 +105,6 @@ class SimulatorBase {
   ConvertArg(T arg) {
     return reinterpret_cast<intptr_t>(arg);
   }
-
-  // Convert back integral return types. This is always a narrowing conversion.
-  template <typename T>
-  static typename std::enable_if<std::is_integral<T>::value, T>::type
-  ConvertReturn(intptr_t ret) {
-    static_assert(sizeof(T) <= sizeof(intptr_t), "type bigger than ptrsize");
-    return static_cast<T>(ret);
-  }
-
-  // Convert back pointer-typed return types.
-  template <typename T>
-  static typename std::enable_if<std::is_pointer<T>::value, T>::type
-  ConvertReturn(intptr_t ret) {
-    return reinterpret_cast<T>(ret);
-  }
-
-  // Convert back void return type (i.e. no return).
-  template <typename T>
-  static typename std::enable_if<std::is_void<T>::value, T>::type ConvertReturn(
-      intptr_t ret) {}
 };
 
 // When the generated code calls an external reference we need to catch that in
@@ -121,7 +124,7 @@ class SimulatorBase {
 //  - V8_TARGET_ARCH_S390: svc (Supervisor Call)
 class Redirection {
  public:
-  Redirection(void* external_function, ExternalReference::Type type);
+  Redirection(Address external_function, ExternalReference::Type type);
 
   Address address_of_instruction() {
 #if ABI_USES_FUNCTION_DESCRIPTORS
@@ -131,10 +134,12 @@ class Redirection {
 #endif
   }
 
-  void* external_function() { return external_function_; }
+  void* external_function() {
+    return reinterpret_cast<void*>(external_function_);
+  }
   ExternalReference::Type type() { return type_; }
 
-  static Redirection* Get(void* external_function,
+  static Redirection* Get(Address external_function,
                           ExternalReference::Type type);
 
   static Redirection* FromInstruction(Instruction* instruction) {
@@ -159,7 +164,7 @@ class Redirection {
   }
 
  private:
-  void* external_function_;
+  Address external_function_;
   uint32_t instruction_;
   ExternalReference::Type type_;
   Redirection* next_;

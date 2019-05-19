@@ -4,16 +4,19 @@
 
 #include "src/v8.h"
 
-#include "src/api.h"
-#include "src/assembler.h"
+#include <fstream>
+
+#include "src/api/api.h"
 #include "src/base/atomicops.h"
 #include "src/base/once.h"
 #include "src/base/platform/platform.h"
-#include "src/bootstrapper.h"
+#include "src/cpu-features.h"
 #include "src/debug/debug.h"
 #include "src/deoptimizer.h"
 #include "src/elements.h"
 #include "src/frames.h"
+#include "src/init/bootstrapper.h"
+#include "src/interface-descriptors.h"
 #include "src/isolate.h"
 #include "src/libsampler/sampler.h"
 #include "src/objects-inl.h"
@@ -23,6 +26,7 @@
 #include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
 #include "src/tracing/tracing-category-observer.h"
+#include "src/wasm/wasm-engine.h"
 
 namespace v8 {
 namespace internal {
@@ -43,14 +47,13 @@ bool V8::Initialize() {
 
 
 void V8::TearDown() {
+  wasm::WasmEngine::GlobalTearDown();
 #if defined(USE_SIMULATOR)
   Simulator::GlobalTearDown();
 #endif
-  Bootstrapper::TearDownExtensions();
+  CallDescriptors::TearDown();
   ElementsAccessor::TearDown();
   RegisteredExtension::UnregisterAll();
-  Isolate::GlobalTearDown();
-  sampler::Sampler::TearDown();
   FlagList::ResetAllFlags();  // Frees memory held by string arguments.
 }
 
@@ -69,6 +72,26 @@ void V8::InitializeOncePerProcessImpl() {
     FLAG_max_semi_space_size = 1;
   }
 
+  if (FLAG_trace_turbo) {
+    // Create an empty file shared by the process (e.g. the wasm engine).
+    std::ofstream(Isolate::GetTurboCfgFileName(nullptr).c_str(),
+                  std::ios_base::trunc);
+  }
+
+  // Do not expose wasm in jitless mode.
+  //
+  // Even in interpreter-only mode, wasm currently still creates executable
+  // memory at runtime. Unexpose wasm until this changes.
+  // The correctness fuzzers are a special case: many of their test cases are
+  // built by fetching a random property from the the global object, and thus
+  // the global object layout must not change between configs. That is why we
+  // continue exposing wasm on correctness fuzzers even in jitless mode.
+  // TODO(jgruber): Remove this once / if wasm can run without executable
+  // memory.
+  if (FLAG_jitless && !FLAG_correctness_fuzzer_suppressions) {
+    FLAG_expose_wasm = false;
+  }
+
   base::OS::Initialize(FLAG_hard_abort, FLAG_gc_fake_mmap);
 
   if (FLAG_random_seed) SetRandomMmapSeed(FLAG_random_seed);
@@ -78,11 +101,11 @@ void V8::InitializeOncePerProcessImpl() {
 #if defined(USE_SIMULATOR)
   Simulator::InitializeOncePerProcess();
 #endif
-  sampler::Sampler::SetUp();
   CpuFeatures::Probe(false);
   ElementsAccessor::InitializeOncePerProcess();
-  ExternalReference::SetUp();
   Bootstrapper::InitializeOncePerProcess();
+  CallDescriptors::InitializeOncePerProcess();
+  wasm::WasmEngine::InitializeOncePerProcess();
 }
 
 

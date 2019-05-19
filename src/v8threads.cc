@@ -4,10 +4,10 @@
 
 #include "src/v8threads.h"
 
-#include "src/api.h"
-#include "src/bootstrapper.h"
+#include "src/api/api.h"
 #include "src/debug/debug.h"
 #include "src/execution.h"
+#include "src/init/bootstrapper.h"
 #include "src/isolate-inl.h"
 #include "src/regexp/regexp-stack.h"
 #include "src/visitors.h"
@@ -22,7 +22,6 @@ namespace {
 base::Atomic32 g_locker_was_ever_used_ = 0;
 
 }  // namespace
-
 
 // Once the Locker is initialized, the current thread will be guaranteed to have
 // the lock for a given isolate.
@@ -45,12 +44,11 @@ void Locker::Initialize(v8::Isolate* isolate) {
     } else {
       internal::ExecutionAccess access(isolate_);
       isolate_->stack_guard()->ClearThread(access);
-      isolate_->stack_guard()->InitThread(access);
+      isolate_->thread_manager()->InitThread(access);
     }
   }
   DCHECK(isolate_->thread_manager()->IsLockedByCurrentThread());
 }
-
 
 bool Locker::IsLocked(v8::Isolate* isolate) {
   DCHECK_NOT_NULL(isolate);
@@ -58,11 +56,9 @@ bool Locker::IsLocked(v8::Isolate* isolate) {
   return internal_isolate->thread_manager()->IsLockedByCurrentThread();
 }
 
-
 bool Locker::IsActive() {
   return !!base::Relaxed_Load(&g_locker_was_ever_used_);
 }
-
 
 Locker::~Locker() {
   DCHECK(isolate_->thread_manager()->IsLockedByCurrentThread());
@@ -75,7 +71,6 @@ Locker::~Locker() {
     isolate_->thread_manager()->Unlock();
   }
 }
-
 
 void Unlocker::Initialize(v8::Isolate* isolate) {
   DCHECK_NOT_NULL(isolate);
@@ -92,16 +87,19 @@ Unlocker::~Unlocker() {
   isolate_->thread_manager()->RestoreThread();
 }
 
-
 namespace internal {
 
+void ThreadManager::InitThread(const ExecutionAccess& lock) {
+  isolate_->stack_guard()->InitThread(lock);
+  isolate_->debug()->InitThread(lock);
+}
 
 bool ThreadManager::RestoreThread() {
   DCHECK(IsLockedByCurrentThread());
   // First check whether the current thread has been 'lazily archived', i.e.
   // not archived at all.  If that is the case we put the state storage we
   // had prepared back in the free list, since we didn't need it after all.
-  if (lazily_archived_thread_.Equals(ThreadId::Current())) {
+  if (lazily_archived_thread_ == ThreadId::Current()) {
     lazily_archived_thread_ = ThreadId::Invalid();
     Isolate::PerIsolateThreadData* per_thread =
         isolate_->FindPerThreadDataForThisThread();
@@ -127,7 +125,7 @@ bool ThreadManager::RestoreThread() {
       isolate_->FindPerThreadDataForThisThread();
   if (per_thread == nullptr || per_thread->thread_state() == nullptr) {
     // This is a new thread.
-    isolate_->stack_guard()->InitThread(access);
+    InitThread(access);
     return false;
   }
   ThreadState* state = per_thread->thread_state();
@@ -140,29 +138,22 @@ bool ThreadManager::RestoreThread() {
   from = isolate_->regexp_stack()->RestoreStack(from);
   from = isolate_->bootstrapper()->RestoreState(from);
   per_thread->set_thread_state(nullptr);
-  if (state->terminate_on_restore()) {
-    isolate_->stack_guard()->RequestTerminateExecution();
-    state->set_terminate_on_restore(false);
-  }
   state->set_id(ThreadId::Invalid());
   state->Unlink();
   state->LinkInto(ThreadState::FREE_LIST);
   return true;
 }
 
-
 void ThreadManager::Lock() {
   mutex_.Lock();
-  mutex_owner_ = ThreadId::Current();
+  mutex_owner_.store(ThreadId::Current(), std::memory_order_relaxed);
   DCHECK(IsLockedByCurrentThread());
 }
 
-
 void ThreadManager::Unlock() {
-  mutex_owner_ = ThreadId::Invalid();
+  mutex_owner_.store(ThreadId::Invalid(), std::memory_order_relaxed);
   mutex_.Unlock();
 }
-
 
 static int ArchiveSpacePerThread() {
   return HandleScopeImplementer::ArchiveSpacePerThread() +
@@ -176,7 +167,6 @@ static int ArchiveSpacePerThread() {
 
 ThreadState::ThreadState(ThreadManager* thread_manager)
     : id_(ThreadId::Invalid()),
-      terminate_on_restore_(false),
       data_(nullptr),
       next_(this),
       previous_(this),
@@ -186,17 +176,14 @@ ThreadState::~ThreadState() {
   DeleteArray<char>(data_);
 }
 
-
 void ThreadState::AllocateSpace() {
   data_ = NewArray<char>(ArchiveSpacePerThread());
 }
-
 
 void ThreadState::Unlink() {
   next_->previous_ = previous_;
   previous_->next_ = next_;
 }
-
 
 void ThreadState::LinkInto(List list) {
   ThreadState* flying_anchor =
@@ -208,7 +195,6 @@ void ThreadState::LinkInto(List list) {
   next_->previous_ = this;
 }
 
-
 ThreadState* ThreadManager::GetFreeThreadState() {
   ThreadState* gotten = free_anchor_->next_;
   if (gotten == free_anchor_) {
@@ -219,12 +205,10 @@ ThreadState* ThreadManager::GetFreeThreadState() {
   return gotten;
 }
 
-
 // Gets the first in the list of archived threads.
 ThreadState* ThreadManager::FirstThreadStateInUse() {
   return in_use_anchor_->Next();
 }
-
 
 ThreadState* ThreadState::Next() {
   if (next_ == thread_manager_->in_use_anchor_) return nullptr;
@@ -234,22 +218,21 @@ ThreadState* ThreadState::Next() {
 // Thread ids must start with 1, because in TLS having thread id 0 can't
 // be distinguished from not having a thread id at all (since NULL is
 // defined as 0.)
-ThreadManager::ThreadManager()
+ThreadManager::ThreadManager(Isolate* isolate)
     : mutex_owner_(ThreadId::Invalid()),
       lazily_archived_thread_(ThreadId::Invalid()),
       lazily_archived_thread_state_(nullptr),
       free_anchor_(nullptr),
-      in_use_anchor_(nullptr) {
+      in_use_anchor_(nullptr),
+      isolate_(isolate) {
   free_anchor_ = new ThreadState(this);
   in_use_anchor_ = new ThreadState(this);
 }
-
 
 ThreadManager::~ThreadManager() {
   DeleteThreadStateList(free_anchor_);
   DeleteThreadStateList(in_use_anchor_);
 }
-
 
 void ThreadManager::DeleteThreadStateList(ThreadState* anchor) {
   // The list starts and ends with the anchor.
@@ -261,9 +244,8 @@ void ThreadManager::DeleteThreadStateList(ThreadState* anchor) {
   delete anchor;
 }
 
-
 void ThreadManager::ArchiveThread() {
-  DCHECK(lazily_archived_thread_.Equals(ThreadId::Invalid()));
+  DCHECK_EQ(lazily_archived_thread_, ThreadId::Invalid());
   DCHECK(!IsArchived());
   DCHECK(IsLockedByCurrentThread());
   ThreadState* state = GetFreeThreadState();
@@ -273,11 +255,10 @@ void ThreadManager::ArchiveThread() {
   per_thread->set_thread_state(state);
   lazily_archived_thread_ = ThreadId::Current();
   lazily_archived_thread_state_ = state;
-  DCHECK(state->id().Equals(ThreadId::Invalid()));
+  DCHECK_EQ(state->id(), ThreadId::Invalid());
   state->set_id(CurrentId());
-  DCHECK(!state->id().Equals(ThreadId::Invalid()));
+  DCHECK_NE(state->id(), ThreadId::Invalid());
 }
-
 
 void ThreadManager::EagerlyArchiveThread() {
   DCHECK(IsLockedByCurrentThread());
@@ -297,7 +278,6 @@ void ThreadManager::EagerlyArchiveThread() {
   lazily_archived_thread_state_ = nullptr;
 }
 
-
 void ThreadManager::FreeThreadResources() {
   DCHECK(!isolate_->has_pending_exception());
   DCHECK(!isolate_->external_caught_exception());
@@ -309,7 +289,6 @@ void ThreadManager::FreeThreadResources() {
   isolate_->regexp_stack()->FreeThreadResources();
   isolate_->bootstrapper()->FreeThreadResources();
 }
-
 
 bool ThreadManager::IsArchived() {
   Isolate::PerIsolateThreadData* data =
@@ -328,7 +307,6 @@ void ThreadManager::Iterate(RootVisitor* v) {
   }
 }
 
-
 void ThreadManager::IterateArchivedThreads(ThreadVisitor* v) {
   for (ThreadState* state = FirstThreadStateInUse(); state != nullptr;
        state = state->Next()) {
@@ -338,21 +316,9 @@ void ThreadManager::IterateArchivedThreads(ThreadVisitor* v) {
   }
 }
 
-
 ThreadId ThreadManager::CurrentId() {
   return ThreadId::Current();
 }
-
-
-void ThreadManager::TerminateExecution(ThreadId thread_id) {
-  for (ThreadState* state = FirstThreadStateInUse(); state != nullptr;
-       state = state->Next()) {
-    if (thread_id.Equals(state->id())) {
-      state->set_terminate_on_restore(true);
-    }
-  }
-}
-
 
 }  // namespace internal
 }  // namespace v8

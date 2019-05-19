@@ -9,24 +9,18 @@
 
 #include "src/assembler-inl.h"
 #include "src/debug/debug.h"
-#include "src/macro-assembler.h"
+#include "src/frames-inl.h"
+#include "src/handles-inl.h"
 #include "src/prototype.h"
 
 namespace v8 {
 namespace internal {
 
-
-Address IC::address() const {
-  // Get the address of the call.
-  return Assembler::target_address_from_return_address(pc());
-}
-
-
 Address IC::constant_pool() const {
   if (FLAG_enable_embedded_constant_pool) {
     return raw_constant_pool();
   } else {
-    return nullptr;
+    return kNullAddress;
   }
 }
 
@@ -35,27 +29,41 @@ Address IC::raw_constant_pool() const {
   if (FLAG_enable_embedded_constant_pool) {
     return *constant_pool_address_;
   } else {
-    return nullptr;
+    return kNullAddress;
   }
 }
 
-
-bool IC::IsHandler(Object* object) {
-  return (object->IsSmi() && (object != nullptr)) || object->IsDataHandler() ||
-         object->IsWeakCell() || object->IsCode();
+void IC::update_receiver_map(Handle<Object> receiver) {
+  if (receiver->IsSmi()) {
+    receiver_map_ = isolate_->factory()->heap_number_map();
+  } else {
+    receiver_map_ = handle(HeapObject::cast(*receiver)->map(), isolate_);
+  }
 }
 
-bool IC::AddressIsDeoptimizedCode() const {
-  return AddressIsDeoptimizedCode(isolate(), address());
+bool IC::IsHandler(MaybeObject object) {
+  HeapObject heap_object;
+  return (object->IsSmi() && (object.ptr() != kNullAddress)) ||
+         (object->GetHeapObjectIfWeak(&heap_object) &&
+          (heap_object->IsMap() || heap_object->IsPropertyCell())) ||
+         (object->GetHeapObjectIfStrong(&heap_object) &&
+          (heap_object->IsDataHandler() || heap_object->IsCode()));
 }
 
-
-bool IC::AddressIsDeoptimizedCode(Isolate* isolate, Address address) {
-  Code* host =
-      isolate->inner_pointer_to_code_cache()->GetCacheEntry(address)->code;
+bool IC::HostIsDeoptimizedCode() const {
+  Code host =
+      isolate()->inner_pointer_to_code_cache()->GetCacheEntry(pc())->code;
   return (host->kind() == Code::OPTIMIZED_FUNCTION &&
           host->marked_for_deoptimization());
 }
+
+bool IC::vector_needs_update() {
+  if (state() == NO_FEEDBACK) return false;
+  return (!vector_set_ &&
+          (state() != MEGAMORPHIC ||
+           nexus()->GetFeedbackExtra().ToSmi().value() != ELEMENT));
+}
+
 }  // namespace internal
 }  // namespace v8
 

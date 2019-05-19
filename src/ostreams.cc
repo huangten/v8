@@ -3,23 +3,70 @@
 // found in the LICENSE file.
 
 #include "src/ostreams.h"
+
+#include <cinttypes>
+
 #include "src/objects.h"
 #include "src/objects/string.h"
 
 #if V8_OS_WIN
+#include <windows.h>
 #if _MSC_VER < 1900
 #define snprintf sprintf_s
 #endif
 #endif
 
+#if defined(ANDROID) && !defined(V8_ANDROID_LOG_STDOUT)
+#define LOG_TAG "v8"
+#include <android/log.h>  // NOLINT
+#endif
+
 namespace v8 {
 namespace internal {
 
+DbgStreamBuf::DbgStreamBuf() { setp(data_, data_ + sizeof(data_)); }
+
+DbgStreamBuf::~DbgStreamBuf() { sync(); }
+
+int DbgStreamBuf::overflow(int c) {
+#if V8_OS_WIN
+  if (!IsDebuggerPresent()) {
+    return 0;
+  }
+
+  sync();
+
+  if (c != EOF) {
+    if (pbase() == epptr()) {
+      auto as_char = static_cast<char>(c);
+      OutputDebugStringA(&as_char);
+    } else {
+      sputc(static_cast<char>(c));
+    }
+  }
+#endif
+  return 0;
+}
+
+int DbgStreamBuf::sync() {
+#if V8_OS_WIN
+  if (!IsDebuggerPresent()) {
+    return 0;
+  }
+
+  if (pbase() != pptr()) {
+    OutputDebugStringA(std::string(pbase(), static_cast<std::string::size_type>(
+                                                pptr() - pbase()))
+                           .c_str());
+    setp(pbase(), epptr());
+  }
+#endif
+  return 0;
+}
+
+DbgStdoutStream::DbgStdoutStream() : std::ostream(&streambuf_) {}
+
 OFStreamBase::OFStreamBase(FILE* f) : f_(f) {}
-
-
-OFStreamBase::~OFStreamBase() {}
-
 
 int OFStreamBase::sync() {
   std::fflush(f_);
@@ -37,15 +84,37 @@ std::streamsize OFStreamBase::xsputn(const char* s, std::streamsize n) {
       std::fwrite(s, 1, static_cast<size_t>(n), f_));
 }
 
-
 OFStream::OFStream(FILE* f) : std::ostream(nullptr), buf_(f) {
   DCHECK_NOT_NULL(f);
   rdbuf(&buf_);
 }
 
+#if defined(ANDROID) && !defined(V8_ANDROID_LOG_STDOUT)
+AndroidLogStream::~AndroidLogStream() {
+  // If there is anything left in the line buffer, print it now, even though it
+  // was not terminated by a newline.
+  if (!line_buffer_.empty()) {
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, line_buffer_.c_str());
+  }
+}
 
-OFStream::~OFStream() {}
-
+std::streamsize AndroidLogStream::xsputn(const char* s, std::streamsize n) {
+  const char* const e = s + n;
+  while (s < e) {
+    const char* newline = reinterpret_cast<const char*>(memchr(s, '\n', e - s));
+    size_t line_chars = (newline ? newline : e) - s;
+    line_buffer_.append(s, line_chars);
+    // Without terminating newline, keep the characters in the buffer for the
+    // next invocation.
+    if (!newline) break;
+    // Otherwise, write out the first line, then continue.
+    __android_log_write(ANDROID_LOG_INFO, LOG_TAG, line_buffer_.c_str());
+    line_buffer_.clear();
+    s = newline + 1;
+  }
+  return n;
+}
+#endif
 
 namespace {
 
@@ -131,3 +200,6 @@ std::ostream& operator<<(std::ostream& os, const AsHexBytes& hex) {
 
 }  // namespace internal
 }  // namespace v8
+
+#undef snprintf
+#undef LOG_TAG

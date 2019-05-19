@@ -25,10 +25,11 @@ typedef unsigned char byte;
  */
 const int kMaxMappingSize = 4;
 
+#ifndef V8_INTL_SUPPORT
 template <class T, int size = 256>
 class Predicate {
  public:
-  inline Predicate() { }
+  inline Predicate() = default;
   inline bool get(uchar c);
 
  private:
@@ -39,8 +40,12 @@ class Predicate {
     inline CacheEntry()
         : bit_field_(CodePointField::encode(0) | ValueField::encode(0)) {}
     inline CacheEntry(uchar code_point, bool value)
-        : bit_field_(CodePointField::encode(code_point) |
-                     ValueField::encode(value)) {}
+        : bit_field_(
+              CodePointField::encode(CodePointField::kMask & code_point) |
+              ValueField::encode(value)) {
+      DCHECK_IMPLIES((CodePointField::kMask & code_point) != code_point,
+                     code_point == static_cast<uchar>(-1));
+    }
 
     uchar code_point() const { return CodePointField::decode(bit_field_); }
     bool value() const { return ValueField::decode(bit_field_); }
@@ -64,7 +69,7 @@ class Predicate {
 template <class T, int size = 256>
 class Mapping {
  public:
-  inline Mapping() { }
+  inline Mapping() = default;
   inline int get(uchar c, uchar n, uchar* result);
  private:
   friend class Test;
@@ -83,7 +88,6 @@ class Mapping {
   CacheEntry entries_[kSize];
 };
 
-
 class UnicodeData {
  private:
   friend class Test;
@@ -91,25 +95,24 @@ class UnicodeData {
   static const uchar kMaxCodePoint;
 };
 
+#endif  // !V8_INTL_SUPPORT
 
 class Utf16 {
  public:
+  static const int kNoPreviousCharacter = -1;
   static inline bool IsSurrogatePair(int lead, int trail) {
     return IsLeadSurrogate(lead) && IsTrailSurrogate(trail);
   }
   static inline bool IsLeadSurrogate(int code) {
-    if (code == kNoPreviousCharacter) return false;
     return (code & 0xfc00) == 0xd800;
   }
   static inline bool IsTrailSurrogate(int code) {
-    if (code == kNoPreviousCharacter) return false;
     return (code & 0xfc00) == 0xdc00;
   }
 
   static inline int CombineSurrogatePair(uchar lead, uchar trail) {
     return 0x10000 + ((lead & 0x3ff) << 10) + (trail & 0x3ff);
   }
-  static const int kNoPreviousCharacter = -1;
   static const uchar kMaxNonSurrogateCharCode = 0xffff;
   // Encoding a single UTF-16 code unit will produce 1, 2 or 3 bytes
   // of UTF-8 data.  The special case where the unit is a surrogate
@@ -125,6 +128,25 @@ class Utf16 {
   }
   static inline uint16_t TrailSurrogate(uint32_t char_code) {
     return 0xdc00 + (char_code & 0x3ff);
+  }
+};
+
+class Latin1 {
+ public:
+  static const uint16_t kMaxChar = 0xff;
+  // Convert the character to Latin-1 case equivalent if possible.
+  static inline uint16_t TryConvertToLatin1(uint16_t c) {
+    switch (c) {
+      // This are equivalent characters in unicode.
+      case 0x39c:
+      case 0x3bc:
+        return 0xb5;
+      // This is an uppercase of a Latin-1 character
+      // outside of Latin-1.
+      case 0x178:
+        return 0xff;
+    }
+    return c;
   }
 };
 
@@ -161,8 +183,8 @@ class V8_EXPORT_PRIVATE Utf8 {
   static inline uchar ValueOf(const byte* str, size_t length, size_t* cursor);
 
   typedef uint32_t Utf8IncrementalBuffer;
-  static uchar ValueOfIncremental(byte next_byte, size_t* cursor, State* state,
-                                  Utf8IncrementalBuffer* buffer);
+  static inline uchar ValueOfIncremental(const byte** cursor, State* state,
+                                         Utf8IncrementalBuffer* buffer);
   static uchar ValueOfIncrementalFinish(State* state);
 
   // Excludes non-characters from the set of valid code points.
@@ -225,28 +247,28 @@ struct ToUppercase {
                      uchar* result,
                      bool* allow_caching_ptr);
 };
-#endif
-struct Ecma262Canonicalize {
+struct V8_EXPORT_PRIVATE Ecma262Canonicalize {
   static const int kMaxWidth = 1;
   static int Convert(uchar c,
                      uchar n,
                      uchar* result,
                      bool* allow_caching_ptr);
 };
-struct Ecma262UnCanonicalize {
+struct V8_EXPORT_PRIVATE Ecma262UnCanonicalize {
   static const int kMaxWidth = 4;
   static int Convert(uchar c,
                      uchar n,
                      uchar* result,
                      bool* allow_caching_ptr);
 };
-struct CanonicalizationRange {
+struct V8_EXPORT_PRIVATE CanonicalizationRange {
   static const int kMaxWidth = 1;
   static int Convert(uchar c,
                      uchar n,
                      uchar* result,
                      bool* allow_caching_ptr);
 };
+#endif  // !V8_INTL_SUPPORT
 
 }  // namespace unibrow
 

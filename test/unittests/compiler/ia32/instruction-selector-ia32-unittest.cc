@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "test/unittests/compiler/instruction-selector-unittest.h"
+#include "test/unittests/compiler/backend/instruction-selector-unittest.h"
 
 #include "src/objects-inl.h"
 
@@ -313,11 +313,9 @@ TEST_P(InstructionSelectorMemoryAccessTest, StoreWithImmediateIndex) {
   }
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest,
-                        InstructionSelectorMemoryAccessTest,
-                        ::testing::ValuesIn(kMemoryAccesses));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest,
+                         InstructionSelectorMemoryAccessTest,
+                         ::testing::ValuesIn(kMemoryAccesses));
 
 // -----------------------------------------------------------------------------
 // AddressingMode for loads and stores.
@@ -622,10 +620,8 @@ TEST_P(InstructionSelectorMultTest, MultAdd32) {
   }
 }
 
-
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorMultTest,
-                        ::testing::ValuesIn(kMultParams));
-
+INSTANTIATE_TEST_SUITE_P(InstructionSelectorTest, InstructionSelectorMultTest,
+                         ::testing::ValuesIn(kMultParams));
 
 TEST_F(InstructionSelectorTest, Int32MulHigh) {
   StreamBuilder m(this, MachineType::Int32(), MachineType::Int32(),
@@ -844,13 +840,56 @@ TEST_F(InstructionSelectorTest, Word32Clz) {
   EXPECT_EQ(s.ToVreg(n), s.ToVreg(s[0]->Output()));
 }
 
-TEST_F(InstructionSelectorTest, SpeculationFence) {
+TEST_F(InstructionSelectorTest, StackCheck0) {
+  ExternalReference js_stack_limit =
+      ExternalReference::Create(isolate()->stack_guard()->address_of_jslimit());
   StreamBuilder m(this, MachineType::Int32());
-  m.SpeculationFence();
+  Node* const sp = m.LoadStackPointer();
+  Node* const stack_limit =
+      m.Load(MachineType::Pointer(), m.ExternalConstant(js_stack_limit));
+  Node* const interrupt = m.UintPtrLessThan(sp, stack_limit);
+
+  RawMachineLabel if_true, if_false;
+  m.Branch(interrupt, &if_true, &if_false);
+
+  m.Bind(&if_true);
+  m.Return(m.Int32Constant(1));
+
+  m.Bind(&if_false);
   m.Return(m.Int32Constant(0));
+
   Stream s = m.Build();
+
   ASSERT_EQ(1U, s.size());
-  EXPECT_EQ(kLFence, s[0]->arch_opcode());
+  EXPECT_EQ(kIA32Cmp, s[0]->arch_opcode());
+  EXPECT_EQ(4U, s[0]->InputCount());
+  EXPECT_EQ(0U, s[0]->OutputCount());
+}
+
+TEST_F(InstructionSelectorTest, StackCheck1) {
+  ExternalReference js_stack_limit =
+      ExternalReference::Create(isolate()->stack_guard()->address_of_jslimit());
+  StreamBuilder m(this, MachineType::Int32());
+  Node* const sp = m.LoadStackPointer();
+  Node* const stack_limit =
+      m.Load(MachineType::Pointer(), m.ExternalConstant(js_stack_limit));
+  Node* const sp_within_limit = m.UintPtrLessThan(stack_limit, sp);
+
+  RawMachineLabel if_true, if_false;
+  m.Branch(sp_within_limit, &if_true, &if_false);
+
+  m.Bind(&if_true);
+  m.Return(m.Int32Constant(1));
+
+  m.Bind(&if_false);
+  m.Return(m.Int32Constant(0));
+
+  Stream s = m.Build();
+
+  ASSERT_EQ(1U, s.size());
+  EXPECT_EQ(kIA32StackCheck, s[0]->arch_opcode());
+  EXPECT_EQ(2U, s[0]->InputCount());
+  EXPECT_EQ(0U, s[0]->OutputCount());
 }
 
 }  // namespace compiler

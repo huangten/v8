@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/globals.h"
+#include "src/wasm/wasm-limits.h"
 
 namespace v8 {
 namespace internal {
@@ -29,19 +30,20 @@ class V8_EXPORT_PRIVATE FlagList {
   static std::vector<const char*>* argv();
 
   // Set the flag values by parsing the command line. If remove_flags is
-  // set, the flags and associated values are removed from (argc,
-  // argv). Returns 0 if no error occurred. Otherwise, returns the argv
-  // index > 0 for the argument where an error occurred. In that case,
-  // (argc, argv) will remain unchanged independent of the remove_flags
-  // value, and no assumptions about flag settings should be made.
+  // set, the recognized flags and associated values are removed from (argc,
+  // argv) and only unknown arguments remain. Returns 0 if no error occurred.
+  // Otherwise, returns the argv index > 0 for the argument where an error
+  // occurred. In that case, (argc, argv) will remain unchanged independent of
+  // the remove_flags value, and no assumptions about flag settings should be
+  // made.
   //
   // The following syntax for flags is accepted (both '-' and '--' are ok):
   //
   //   --flag        (bool flags only)
-  //   --noflag      (bool flags only)
+  //   --no-flag     (bool flags only)
   //   --flag=value  (non-bool flags only, no spaces around '=')
   //   --flag value  (non-bool flags only)
-  //   --            (equivalent to --js_arguments, captures all remaining args)
+  //   --            (capture all remaining args in JavaScript)
   static int SetFlagsFromCommandLine(int* argc,
                                      char** argv,
                                      bool remove_flags);
@@ -49,7 +51,7 @@ class V8_EXPORT_PRIVATE FlagList {
   // Set the flag values by parsing the string str. Splits string into argc
   // substrings argv[], each of which consisting of non-white-space chars,
   // and then calls SetFlagsFromCommandLine() and returns its result.
-  static int SetFlagsFromString(const char* str, int len);
+  static int SetFlagsFromString(const char* str, size_t len);
 
   // Reset all flags to their default value.
   static void ResetAllFlags();

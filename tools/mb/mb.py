@@ -10,6 +10,7 @@ MB is a wrapper script for GN that can be used to generate build files
 for sets of canned configurations and analyze them.
 """
 
+# for py2/py3 compatibility
 from __future__ import print_function
 
 import argparse
@@ -35,6 +36,12 @@ CHROMIUM_SRC_DIR = os.path.dirname(os.path.dirname(os.path.dirname(
 sys.path = [os.path.join(CHROMIUM_SRC_DIR, 'build')] + sys.path
 
 import gn_helpers
+
+try:
+  cmp              # Python 2
+except NameError:  # Python 3
+  def cmp(x, y):   # pylint: disable=redefined-builtin
+    return (x > y) - (x < y)
 
 
 def main(args):
@@ -160,6 +167,12 @@ class MetaBuildWrapper(object):
                             help='look up the command for a given config or '
                                  'builder')
     AddCommonOptions(subp)
+    subp.add_argument('--quiet', default=False, action='store_true',
+                      help='Print out just the arguments, '
+                           'do not emulate the output of the gen subcommand.')
+    subp.add_argument('--recursive', default=False, action='store_true',
+                      help='Lookup arguments from imported files, '
+                           'implies --quiet')
     subp.set_defaults(func=self.CmdLookup)
 
     subp = subps.add_parser(
@@ -233,10 +246,6 @@ class MetaBuildWrapper(object):
 
     self.args = parser.parse_args(argv)
 
-    # TODO(machenbach): This prepares passing swarming targets to isolate on the
-    # infra side.
-    self.args.swarming_targets_file = None
-
   def DumpInputFiles(self):
 
     def DumpContentsOfFilePassedTo(arg_name, path):
@@ -304,12 +313,15 @@ class MetaBuildWrapper(object):
 
   def CmdLookup(self):
     vals = self.Lookup()
-    cmd = self.GNCmd('gen', '_path_')
-    gn_args = self.GNArgs(vals)
-    self.Print('\nWriting """\\\n%s""" to _path_/args.gn.\n' % gn_args)
-    env = None
+    gn_args = self.GNArgs(vals, expand_imports=self.args.recursive)
+    if self.args.quiet or self.args.recursive:
+      self.Print(gn_args, end='')
+    else:
+      cmd = self.GNCmd('gen', '_path_')
+      self.Print('\nWriting """\\\n%s""" to _path_/args.gn.\n' % gn_args)
+      env = None
 
-    self.PrintCmd(cmd, env)
+      self.PrintCmd(cmd, env)
     return 0
 
   def CmdRun(self):
@@ -393,7 +405,7 @@ class MetaBuildWrapper(object):
     elif self.platform.startswith('linux'):
       os_dim = ('os', 'Ubuntu-14.04')
     elif self.platform == 'win32':
-      os_dim = ('os', 'Windows-10-14393')
+      os_dim = ('os', 'Windows-10')
     else:
       raise MBErr('unrecognized platform string "%s"' % self.platform)
 
@@ -839,11 +851,17 @@ class MetaBuildWrapper(object):
     else:
       subdir, exe = 'win', 'gn.exe'
 
-    gn_path = self.PathJoin(self.chromium_src_dir, 'buildtools', subdir, exe)
+    arch = platform.machine()
+    if (arch.startswith('s390') or arch.startswith('ppc') or
+        self.platform.startswith('aix')):
+      # use gn in PATH
+      gn_path = 'gn'
+    else:
+      gn_path = self.PathJoin(self.chromium_src_dir, 'buildtools', subdir, exe)
     return [gn_path, subcommand, path] + list(args)
 
 
-  def GNArgs(self, vals):
+  def GNArgs(self, vals, expand_imports=False):
     if vals['cros_passthrough']:
       if not 'GN_ARGS' in os.environ:
         raise MBErr('MB is expecting GN_ARGS to be in the environment')
@@ -865,15 +883,24 @@ class MetaBuildWrapper(object):
     if android_version_name:
       gn_args += ' android_default_version_name="%s"' % android_version_name
 
-    # Canonicalize the arg string into a sorted, newline-separated list
-    # of key-value pairs, and de-dup the keys if need be so that only
-    # the last instance of each arg is listed.
-    gn_args = gn_helpers.ToGNString(gn_helpers.FromGNArgs(gn_args))
+    args_gn_lines = []
+    parsed_gn_args = {}
 
     args_file = vals.get('args_file', None)
     if args_file:
-      gn_args = ('import("%s")\n' % vals['args_file']) + gn_args
-    return gn_args
+      if expand_imports:
+        content = self.ReadFile(self.ToAbsPath(args_file))
+        parsed_gn_args = gn_helpers.FromGNArgs(content)
+      else:
+        args_gn_lines.append('import("%s")' % args_file)
+
+    # Canonicalize the arg string into a sorted, newline-separated list
+    # of key-value pairs, and de-dup the keys if need be so that only
+    # the last instance of each arg is listed.
+    parsed_gn_args.update(gn_helpers.FromGNArgs(gn_args))
+    args_gn_lines.append(gn_helpers.ToGNString(parsed_gn_args))
+
+    return '\n'.join(args_gn_lines)
 
   def ToAbsPath(self, build_path, *comps):
     return self.PathJoin(self.chromium_src_dir,
@@ -1153,7 +1180,7 @@ class MetaBuildWrapper(object):
   def MaybeMakeDirectory(self, path):
     try:
       os.makedirs(path)
-    except OSError, e:
+    except OSError as e:
       if e.errno != errno.EEXIST:
         raise
 

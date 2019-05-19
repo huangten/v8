@@ -7,7 +7,7 @@
 
 #include "include/v8.h"
 #include "src/allocation.h"
-// TODO(ishell): remove once FLAG_track_constant_fields is removed.
+// TODO(bmeurer): Remove once FLAG_modify_field_representation_inplace is gone.
 #include "src/flags.h"
 #include "src/utils.h"
 
@@ -32,7 +32,6 @@ enum PropertyAttributes {
   // a non-existent property.
 };
 
-
 enum PropertyFilter {
   ALL_PROPERTIES = 0,
   ONLY_WRITABLE = 1,
@@ -41,6 +40,7 @@ enum PropertyFilter {
   SKIP_STRINGS = 8,
   SKIP_SYMBOLS = 16,
   ONLY_ALL_CAN_READ = 32,
+  PRIVATE_NAMES_ONLY = 64,
   ENUMERABLE_STRINGS = ONLY_ENUMERABLE | SKIP_SYMBOLS,
 };
 // Enable fast comparisons of PropertyAttributes against PropertyFilters.
@@ -76,26 +76,16 @@ enum PropertyLocation { kField = 0, kDescriptor = 1 };
 
 // Order of modes is significant.
 // Must fit in the BitField PropertyDetails::ConstnessField.
-enum PropertyConstness { kMutable = 0, kConst = 1 };
-
-// TODO(ishell): remove once constant field tracking is done.
-const PropertyConstness kDefaultFieldConstness =
-    FLAG_track_constant_fields ? kConst : kMutable;
+enum class PropertyConstness { kMutable = 0, kConst = 1 };
 
 class Representation {
  public:
   enum Kind {
     kNone,
-    kInteger8,
-    kUInteger8,
-    kInteger16,
-    kUInteger16,
     kSmi,
-    kInteger32,
     kDouble,
     kHeapObject,
     kTagged,
-    kExternal,
     kNumRepresentations
   };
 
@@ -103,15 +93,9 @@ class Representation {
 
   static Representation None() { return Representation(kNone); }
   static Representation Tagged() { return Representation(kTagged); }
-  static Representation Integer8() { return Representation(kInteger8); }
-  static Representation UInteger8() { return Representation(kUInteger8); }
-  static Representation Integer16() { return Representation(kInteger16); }
-  static Representation UInteger16() { return Representation(kUInteger16); }
   static Representation Smi() { return Representation(kSmi); }
-  static Representation Integer32() { return Representation(kInteger32); }
   static Representation Double() { return Representation(kDouble); }
   static Representation HeapObject() { return Representation(kHeapObject); }
-  static Representation External() { return Representation(kExternal); }
 
   static Representation FromKind(Kind kind) { return Representation(kind); }
 
@@ -120,24 +104,21 @@ class Representation {
   }
 
   bool IsCompatibleForLoad(const Representation& other) const {
-    return (IsDouble() && other.IsDouble()) ||
-        (!IsDouble() && !other.IsDouble());
+    return IsDouble() == other.IsDouble();
   }
 
   bool IsCompatibleForStore(const Representation& other) const {
     return Equals(other);
   }
 
-  bool is_more_general_than(const Representation& other) const {
-    if (kind_ == kExternal && other.kind_ == kNone) return true;
-    if (kind_ == kExternal && other.kind_ == kExternal) return false;
-    if (kind_ == kNone && other.kind_ == kExternal) return false;
+  bool CanBeInPlaceChangedTo(const Representation& other) const {
+    if (IsNone()) return true;
+    if (!FLAG_modify_field_representation_inplace) return false;
+    return (IsSmi() || IsHeapObject()) && other.IsTagged();
+  }
 
-    DCHECK_NE(kind_, kExternal);
-    DCHECK_NE(other.kind_, kExternal);
+  bool is_more_general_than(const Representation& other) const {
     if (IsHeapObject()) return other.IsNone();
-    if (kind_ == kUInteger8 && other.kind_ == kInteger8) return false;
-    if (kind_ == kUInteger16 && other.kind_ == kInteger16) return false;
     return kind_ > other.kind_;
   }
 
@@ -153,38 +134,34 @@ class Representation {
 
   int size() const {
     DCHECK(!IsNone());
-    if (IsInteger8() || IsUInteger8()) {
-      return sizeof(uint8_t);
-    }
-    if (IsInteger16() || IsUInteger16()) {
-      return sizeof(uint16_t);
-    }
-    if (IsInteger32()) {
-      return sizeof(uint32_t);
-    }
-    return kPointerSize;
+    if (IsDouble()) return kDoubleSize;
+    DCHECK(IsTagged() || IsSmi() || IsHeapObject());
+    return kTaggedSize;
   }
 
   Kind kind() const { return static_cast<Kind>(kind_); }
   bool IsNone() const { return kind_ == kNone; }
-  bool IsInteger8() const { return kind_ == kInteger8; }
-  bool IsUInteger8() const { return kind_ == kUInteger8; }
-  bool IsInteger16() const { return kind_ == kInteger16; }
-  bool IsUInteger16() const { return kind_ == kUInteger16; }
   bool IsTagged() const { return kind_ == kTagged; }
   bool IsSmi() const { return kind_ == kSmi; }
   bool IsSmiOrTagged() const { return IsSmi() || IsTagged(); }
-  bool IsInteger32() const { return kind_ == kInteger32; }
-  bool IsSmiOrInteger32() const { return IsSmi() || IsInteger32(); }
   bool IsDouble() const { return kind_ == kDouble; }
   bool IsHeapObject() const { return kind_ == kHeapObject; }
-  bool IsExternal() const { return kind_ == kExternal; }
-  bool IsSpecialization() const {
-    return IsInteger8() || IsUInteger8() ||
-      IsInteger16() || IsUInteger16() ||
-      IsSmi() || IsInteger32() || IsDouble();
+
+  const char* Mnemonic() const {
+    switch (kind_) {
+      case kNone:
+        return "v";
+      case kTagged:
+        return "t";
+      case kSmi:
+        return "s";
+      case kDouble:
+        return "d";
+      case kHeapObject:
+        return "h";
+    }
+    UNREACHABLE();
   }
-  const char* Mnemonic() const;
 
  private:
   explicit Representation(Kind k) : kind_(k) { }
@@ -197,6 +174,7 @@ class Representation {
 
 
 static const int kDescriptorIndexBitCount = 10;
+static const int kFirstInobjectPropertyOffsetBitCount = 7;
 // The maximum number of descriptors we want in a descriptor array.  It should
 // fit in a page and also the following should hold:
 // kMaxNumberOfDescriptors + kFieldsAdded <= PropertyArray::kMaxLength.
@@ -228,7 +206,7 @@ enum class PropertyCellConstantType {
 
 // PropertyDetails captures type and attributes for a property.
 // They are used both in property dictionaries and instance descriptors.
-class PropertyDetails BASE_EMBEDDED {
+class PropertyDetails {
  public:
   // Property details for dictionary mode properties/elements.
   PropertyDetails(PropertyKind kind, PropertyAttributes attributes,
@@ -285,9 +263,9 @@ class PropertyDetails BASE_EMBEDDED {
     return PropertyDetails(value_, new_attributes);
   }
 
-  // Conversion for storing details as Object*.
-  explicit inline PropertyDetails(Smi* smi);
-  inline Smi* AsSmi() const;
+  // Conversion for storing details as Object.
+  explicit inline PropertyDetails(Smi smi);
+  inline Smi AsSmi() const;
 
   static uint8_t EncodeRepresentation(Representation representation) {
     return representation.kind();
@@ -303,6 +281,11 @@ class PropertyDetails BASE_EMBEDDED {
 
   PropertyAttributes attributes() const {
     return AttributesField::decode(value_);
+  }
+
+  bool HasKindAndAttributes(PropertyKind kind, PropertyAttributes attributes) {
+    return (value_ & (KindField::kMask | AttributesField::kMask)) ==
+           (KindField::encode(kind) | AttributesField::encode(attributes));
   }
 
   int dictionary_index() const {
@@ -353,7 +336,7 @@ class PropertyDetails BASE_EMBEDDED {
 
   // Bit fields for fast objects.
   class RepresentationField
-      : public BitField<uint32_t, AttributesField::kNext, 4> {};
+      : public BitField<uint32_t, AttributesField::kNext, 3> {};
   class DescriptorPointer
       : public BitField<uint32_t, RepresentationField::kNext,
                         kDescriptorIndexBitCount> {};  // NOLINT
@@ -409,19 +392,19 @@ inline bool IsGeneralizableTo(PropertyLocation a, PropertyLocation b) {
   return b == kField || a == kDescriptor;
 }
 
-// kMutable constness is more general than kConst, kConst generalizes only to
-// itself.
+// PropertyConstness::kMutable constness is more general than
+// VariableMode::kConst, VariableMode::kConst generalizes only to itself.
 inline bool IsGeneralizableTo(PropertyConstness a, PropertyConstness b) {
-  return b == kMutable || a == kConst;
+  return b == PropertyConstness::kMutable || a == PropertyConstness::kConst;
 }
 
 inline PropertyConstness GeneralizeConstness(PropertyConstness a,
                                              PropertyConstness b) {
-  return a == kMutable ? kMutable : b;
+  return a == PropertyConstness::kMutable ? PropertyConstness::kMutable : b;
 }
 
-std::ostream& operator<<(std::ostream& os,
-                         const PropertyAttributes& attributes);
+V8_EXPORT_PRIVATE std::ostream& operator<<(
+    std::ostream& os, const PropertyAttributes& attributes);
 }  // namespace internal
 }  // namespace v8
 

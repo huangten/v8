@@ -11,6 +11,8 @@
 namespace v8 {
 namespace internal {
 
+class MicrotaskQueue;
+
 template <typename T>
 class Handle;
 
@@ -26,21 +28,18 @@ class Execution final : public AllStatic {
   // When the function called is not in strict mode, receiver is
   // converted to an object.
   //
-  V8_EXPORT_PRIVATE MUST_USE_RESULT static MaybeHandle<Object> Call(
+  V8_EXPORT_PRIVATE V8_WARN_UNUSED_RESULT static MaybeHandle<Object> Call(
       Isolate* isolate, Handle<Object> callable, Handle<Object> receiver,
       int argc, Handle<Object> argv[]);
 
   // Construct object from function, the caller supplies an array of
   // arguments.
-  MUST_USE_RESULT static MaybeHandle<Object> New(Isolate* isolate,
-                                                 Handle<Object> constructor,
-                                                 int argc,
-                                                 Handle<Object> argv[]);
-  MUST_USE_RESULT static MaybeHandle<Object> New(Isolate* isolate,
-                                                 Handle<Object> constructor,
-                                                 Handle<Object> new_target,
-                                                 int argc,
-                                                 Handle<Object> argv[]);
+  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> New(
+      Isolate* isolate, Handle<Object> constructor, int argc,
+      Handle<Object> argv[]);
+  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> New(
+      Isolate* isolate, Handle<Object> constructor, Handle<Object> new_target,
+      int argc, Handle<Object> argv[]);
 
   // Call a function, just like Call(), but handle don't report exceptions
   // externally.
@@ -49,28 +48,27 @@ class Execution final : public AllStatic {
   // If message_handling is MessageHandling::kReport, exceptions (except for
   // termination exceptions) will be stored in exception_out (if not a
   // nullptr).
-  static MaybeHandle<Object> TryCall(Isolate* isolate, Handle<Object> callable,
-                                     Handle<Object> receiver, int argc,
-                                     Handle<Object> argv[],
-                                     MessageHandling message_handling,
-                                     MaybeHandle<Object>* exception_out,
-                                     Target target = Target::kCallable);
+  V8_EXPORT_PRIVATE static MaybeHandle<Object> TryCall(
+      Isolate* isolate, Handle<Object> callable, Handle<Object> receiver,
+      int argc, Handle<Object> argv[], MessageHandling message_handling,
+      MaybeHandle<Object>* exception_out);
   // Convenience method for performing RunMicrotasks
-  static MaybeHandle<Object> RunMicrotasks(Isolate* isolate,
-                                           MessageHandling message_handling,
-                                           MaybeHandle<Object>* exception_out);
+  static MaybeHandle<Object> TryRunMicrotasks(
+      Isolate* isolate, MicrotaskQueue* microtask_queue,
+      MaybeHandle<Object>* exception_out);
 };
 
 
 class ExecutionAccess;
-class PostponeInterruptsScope;
-
+class InterruptsScope;
 
 // StackGuard contains the handling of the limits that are used to limit the
 // number of nested invocations of JavaScript and the stack size used in each
 // invocation.
 class V8_EXPORT_PRIVATE StackGuard final {
  public:
+  explicit StackGuard(Isolate* isolate) : isolate_(isolate) {}
+
   // Pass the address beyond which the stack should not grow.  The stack
   // is assumed to grow downwards.
   void SetStackLimit(uintptr_t limit);
@@ -92,13 +90,15 @@ class V8_EXPORT_PRIVATE StackGuard final {
   // it has been set up.
   void ClearThread(const ExecutionAccess& lock);
 
-#define INTERRUPT_LIST(V)                       \
-  V(DEBUGBREAK, DebugBreak, 0)                  \
-  V(TERMINATE_EXECUTION, TerminateExecution, 1) \
-  V(GC_REQUEST, GC, 2)                          \
-  V(INSTALL_CODE, InstallCode, 3)               \
-  V(API_INTERRUPT, ApiInterrupt, 4)             \
-  V(DEOPT_MARKED_ALLOCATION_SITES, DeoptMarkedAllocationSites, 5)
+#define INTERRUPT_LIST(V)                                         \
+  V(TERMINATE_EXECUTION, TerminateExecution, 0)                   \
+  V(GC_REQUEST, GC, 1)                                            \
+  V(INSTALL_CODE, InstallCode, 2)                                 \
+  V(API_INTERRUPT, ApiInterrupt, 3)                               \
+  V(DEOPT_MARKED_ALLOCATION_SITES, DeoptMarkedAllocationSites, 4) \
+  V(GROW_SHARED_MEMORY, GrowSharedMemory, 5)                      \
+  V(LOG_WASM_CODE, LogWasmCode, 6)                                \
+  V(WASM_CODE_GC, WasmCodeGC, 7)
 
 #define V(NAME, Name, id)                                                    \
   inline bool Check##Name() { return CheckInterrupt(NAME); }                 \
@@ -138,12 +138,9 @@ class V8_EXPORT_PRIVATE StackGuard final {
 
   // If the stack guard is triggered, but it is not an actual
   // stack overflow, then handle the interruption accordingly.
-  Object* HandleInterrupts();
-  void HandleGCInterrupt();
+  Object HandleInterrupts();
 
  private:
-  StackGuard();
-
   bool CheckInterrupt(InterruptFlag flag);
   void RequestInterrupt(InterruptFlag flag);
   void ClearInterrupt(InterruptFlag flag);
@@ -173,8 +170,8 @@ class V8_EXPORT_PRIVATE StackGuard final {
   static const uintptr_t kIllegalLimit = 0xfffffff8;
 #endif
 
-  void PushPostponeInterruptsScope(PostponeInterruptsScope* scope);
-  void PopPostponeInterruptsScope();
+  void PushInterruptsScope(InterruptsScope* scope);
+  void PopInterruptsScope();
 
   class ThreadLocal final {
    public:
@@ -218,7 +215,7 @@ class V8_EXPORT_PRIVATE StackGuard final {
                                  static_cast<base::AtomicWord>(limit));
     }
 
-    PostponeInterruptsScope* postpone_interrupts_;
+    InterruptsScope* interrupt_scopes_;
     int interrupt_flags_;
   };
 
@@ -229,7 +226,7 @@ class V8_EXPORT_PRIVATE StackGuard final {
 
   friend class Isolate;
   friend class StackLimitCheck;
-  friend class PostponeInterruptsScope;
+  friend class InterruptsScope;
 
   DISALLOW_COPY_AND_ASSIGN(StackGuard);
 };

@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/runtime/runtime-utils.h"
-
-#include "src/arguments.h"
+#include "src/arguments-inl.h"
+#include "src/counters.h"
+#include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/isolate-inl.h"
 #include "src/objects-inl.h"
-#include "src/string-builder.h"
+#include "src/runtime/runtime-utils.h"
+#include "src/string-builder-inl.h"
 
 namespace v8 {
 namespace internal {
@@ -24,20 +25,13 @@ RUNTIME_FUNCTION(Runtime_CreatePrivateSymbol) {
   return *symbol;
 }
 
-RUNTIME_FUNCTION(Runtime_CreatePrivateFieldSymbol) {
+RUNTIME_FUNCTION(Runtime_CreatePrivateNameSymbol) {
   HandleScope scope(isolate);
-  DCHECK_EQ(0, args.length());
-  Handle<Symbol> symbol = isolate->factory()->NewPrivateFieldSymbol();
+  DCHECK_EQ(1, args.length());
+  CONVERT_ARG_HANDLE_CHECKED(String, name, 0);
+  Handle<Symbol> symbol = isolate->factory()->NewPrivateNameSymbol(name);
   return *symbol;
 }
-
-RUNTIME_FUNCTION(Runtime_SymbolDescription) {
-  SealHandleScope shs(isolate);
-  DCHECK_EQ(1, args.length());
-  CONVERT_ARG_CHECKED(Symbol, symbol, 0);
-  return symbol->name();
-}
-
 
 RUNTIME_FUNCTION(Runtime_SymbolDescriptiveString) {
   HandleScope scope(isolate);

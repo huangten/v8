@@ -8,17 +8,15 @@
 #include "src/base/bits.h"
 #include "src/base/lazy-instance.h"
 #include "src/base/logging.h"
+#include "src/base/lsan-page-allocator.h"
 #include "src/base/page-allocator.h"
 #include "src/base/platform/platform.h"
-#include "src/utils.h"
+#include "src/memcopy.h"
 #include "src/v8.h"
+#include "src/vector.h"
 
 #if V8_LIBC_BIONIC
 #include <malloc.h>  // NOLINT
-#endif
-
-#if defined(LEAK_SANITIZER)
-#include <sanitizer/lsan_interface.h>
 #endif
 
 namespace v8 {
@@ -40,25 +38,33 @@ void* AlignedAllocInternal(size_t size, size_t alignment) {
   return ptr;
 }
 
-// TODO(bbudge) Simplify this once all embedders implement a page allocator.
-struct InitializePageAllocator {
-  static void Construct(void* page_allocator_ptr_arg) {
-    auto page_allocator_ptr =
-        reinterpret_cast<v8::PageAllocator**>(page_allocator_ptr_arg);
-    v8::PageAllocator* page_allocator =
-        V8::GetCurrentPlatform()->GetPageAllocator();
-    if (page_allocator == nullptr) {
-      static v8::base::PageAllocator default_allocator;
-      page_allocator = &default_allocator;
+class PageAllocatorInitializer {
+ public:
+  PageAllocatorInitializer() {
+    page_allocator_ = V8::GetCurrentPlatform()->GetPageAllocator();
+    if (page_allocator_ == nullptr) {
+      static base::LeakyObject<base::PageAllocator> default_page_allocator;
+      page_allocator_ = default_page_allocator.get();
     }
-    *page_allocator_ptr = page_allocator;
+#if defined(LEAK_SANITIZER)
+    static base::LeakyObject<base::LsanPageAllocator> lsan_allocator(
+        page_allocator_);
+    page_allocator_ = lsan_allocator.get();
+#endif
   }
+
+  PageAllocator* page_allocator() const { return page_allocator_; }
+
+  void SetPageAllocatorForTesting(PageAllocator* allocator) {
+    page_allocator_ = allocator;
+  }
+
+ private:
+  PageAllocator* page_allocator_;
 };
 
-static base::LazyInstance<v8::PageAllocator*, InitializePageAllocator>::type
-    page_allocator = LAZY_INSTANCE_INITIALIZER;
-
-v8::PageAllocator* GetPageAllocator() { return page_allocator.Get(); }
+DEFINE_LAZY_LEAKY_OBJECT_GETTER(PageAllocatorInitializer,
+                                GetPageTableInitializer)
 
 // We will attempt allocation this many times. After each failure, we call
 // OnCriticalMemoryPressure to try to free some memory.
@@ -66,10 +72,22 @@ const int kAllocationTries = 2;
 
 }  // namespace
 
+v8::PageAllocator* GetPlatformPageAllocator() {
+  DCHECK_NOT_NULL(GetPageTableInitializer()->page_allocator());
+  return GetPageTableInitializer()->page_allocator();
+}
+
+v8::PageAllocator* SetPlatformPageAllocatorForTesting(
+    v8::PageAllocator* new_page_allocator) {
+  v8::PageAllocator* old_page_allocator = GetPlatformPageAllocator();
+  GetPageTableInitializer()->SetPageAllocatorForTesting(new_page_allocator);
+  return old_page_allocator;
+}
+
 void* Malloced::New(size_t size) {
   void* result = AllocWithRetry(size);
   if (result == nullptr) {
-    V8::FatalProcessOutOfMemory("Malloced operator new");
+    V8::FatalProcessOutOfMemory(nullptr, "Malloced operator new");
   }
   return result;
 }
@@ -79,15 +97,15 @@ void Malloced::Delete(void* p) {
 }
 
 char* StrDup(const char* str) {
-  int length = StrLength(str);
+  size_t length = strlen(str);
   char* result = NewArray<char>(length + 1);
   MemCopy(result, str, length);
   result[length] = '\0';
   return result;
 }
 
-char* StrNDup(const char* str, int n) {
-  int length = StrLength(str);
+char* StrNDup(const char* str, size_t n) {
+  size_t length = strlen(str);
   if (n < length) length = n;
   char* result = NewArray<char>(length + 1);
   MemCopy(result, str, length);
@@ -106,7 +124,7 @@ void* AllocWithRetry(size_t size) {
 }
 
 void* AlignedAlloc(size_t size, size_t alignment) {
-  DCHECK_LE(V8_ALIGNOF(void*), alignment);
+  DCHECK_LE(alignof(void*), alignment);
   DCHECK(base::bits::IsPowerOfTwo(alignment));
   void* result = nullptr;
   for (int i = 0; i < kAllocationTries; ++i) {
@@ -115,7 +133,7 @@ void* AlignedAlloc(size_t size, size_t alignment) {
     if (!OnCriticalMemoryPressure(size + alignment)) break;
   }
   if (result == nullptr) {
-    V8::FatalProcessOutOfMemory("AlignedAlloc");
+    V8::FatalProcessOutOfMemory(nullptr, "AlignedAlloc");
   }
   return result;
 }
@@ -131,68 +149,63 @@ void AlignedFree(void *ptr) {
 #endif
 }
 
-size_t AllocatePageSize() { return GetPageAllocator()->AllocatePageSize(); }
+size_t AllocatePageSize() {
+  return GetPlatformPageAllocator()->AllocatePageSize();
+}
 
-size_t CommitPageSize() { return GetPageAllocator()->CommitPageSize(); }
+size_t CommitPageSize() { return GetPlatformPageAllocator()->CommitPageSize(); }
 
 void SetRandomMmapSeed(int64_t seed) {
-  GetPageAllocator()->SetRandomMmapSeed(seed);
+  GetPlatformPageAllocator()->SetRandomMmapSeed(seed);
 }
 
-void* GetRandomMmapAddr() { return GetPageAllocator()->GetRandomMmapAddr(); }
+void* GetRandomMmapAddr() {
+  return GetPlatformPageAllocator()->GetRandomMmapAddr();
+}
 
-void* AllocatePages(void* address, size_t size, size_t alignment,
+void* AllocatePages(v8::PageAllocator* page_allocator, void* address,
+                    size_t size, size_t alignment,
                     PageAllocator::Permission access) {
+  DCHECK_NOT_NULL(page_allocator);
   DCHECK_EQ(address, AlignedAddress(address, alignment));
-  DCHECK_EQ(0UL, size & (GetPageAllocator()->AllocatePageSize() - 1));
+  DCHECK(IsAligned(size, page_allocator->AllocatePageSize()));
   void* result = nullptr;
   for (int i = 0; i < kAllocationTries; ++i) {
-    result =
-        GetPageAllocator()->AllocatePages(address, size, alignment, access);
+    result = page_allocator->AllocatePages(address, size, alignment, access);
     if (result != nullptr) break;
-    size_t request_size = size + alignment - AllocatePageSize();
+    size_t request_size = size + alignment - page_allocator->AllocatePageSize();
     if (!OnCriticalMemoryPressure(request_size)) break;
   }
-#if defined(LEAK_SANITIZER)
-  if (result != nullptr) {
-    __lsan_register_root_region(result, size);
-  }
-#endif
   return result;
 }
 
-bool FreePages(void* address, const size_t size) {
-  DCHECK_EQ(0UL, size & (GetPageAllocator()->AllocatePageSize() - 1));
-  bool result = GetPageAllocator()->FreePages(address, size);
-#if defined(LEAK_SANITIZER)
-  if (result) {
-    __lsan_unregister_root_region(address, size);
-  }
-#endif
-  return result;
+bool FreePages(v8::PageAllocator* page_allocator, void* address,
+               const size_t size) {
+  DCHECK_NOT_NULL(page_allocator);
+  DCHECK(IsAligned(size, page_allocator->AllocatePageSize()));
+  return page_allocator->FreePages(address, size);
 }
 
-bool ReleasePages(void* address, size_t size, size_t new_size) {
+bool ReleasePages(v8::PageAllocator* page_allocator, void* address, size_t size,
+                  size_t new_size) {
+  DCHECK_NOT_NULL(page_allocator);
   DCHECK_LT(new_size, size);
-  bool result = GetPageAllocator()->ReleasePages(address, size, new_size);
-#if defined(LEAK_SANITIZER)
-  if (result) {
-    __lsan_unregister_root_region(address, size);
-    __lsan_register_root_region(address, new_size);
-  }
-#endif
-  return result;
+  DCHECK(IsAligned(new_size, page_allocator->CommitPageSize()));
+  return page_allocator->ReleasePages(address, size, new_size);
 }
 
-bool SetPermissions(void* address, size_t size,
-                    PageAllocator::Permission access) {
-  return GetPageAllocator()->SetPermissions(address, size, access);
+bool SetPermissions(v8::PageAllocator* page_allocator, void* address,
+                    size_t size, PageAllocator::Permission access) {
+  DCHECK_NOT_NULL(page_allocator);
+  return page_allocator->SetPermissions(address, size, access);
 }
 
-byte* AllocatePage(void* address, size_t* allocated) {
-  size_t page_size = AllocatePageSize();
-  void* result =
-      AllocatePages(address, page_size, page_size, PageAllocator::kReadWrite);
+byte* AllocatePage(v8::PageAllocator* page_allocator, void* address,
+                   size_t* allocated) {
+  DCHECK_NOT_NULL(page_allocator);
+  size_t page_size = page_allocator->AllocatePageSize();
+  void* result = AllocatePages(page_allocator, address, page_size, page_size,
+                               PageAllocator::kReadWrite);
   if (result != nullptr) *allocated = page_size;
   return static_cast<byte*>(result);
 }
@@ -206,16 +219,19 @@ bool OnCriticalMemoryPressure(size_t length) {
   return true;
 }
 
-VirtualMemory::VirtualMemory() : address_(nullptr), size_(0) {}
-
-VirtualMemory::VirtualMemory(size_t size, void* hint, size_t alignment)
-    : address_(nullptr), size_(0) {
-  size_t page_size = AllocatePageSize();
-  size_t alloc_size = RoundUp(size, page_size);
-  address_ =
-      AllocatePages(hint, alloc_size, alignment, PageAllocator::kNoAccess);
-  if (address_ != nullptr) {
-    size_ = alloc_size;
+VirtualMemory::VirtualMemory(v8::PageAllocator* page_allocator, size_t size,
+                             void* hint, size_t alignment)
+    : page_allocator_(page_allocator) {
+  DCHECK_NOT_NULL(page_allocator);
+  DCHECK(IsAligned(size, page_allocator_->CommitPageSize()));
+  size_t page_size = page_allocator_->AllocatePageSize();
+  alignment = RoundUp(alignment, page_size);
+  Address address = reinterpret_cast<Address>(
+      AllocatePages(page_allocator_, hint, RoundUp(size, page_size), alignment,
+                    PageAllocator::kNoAccess));
+  if (address != kNullAddress) {
+    DCHECK(IsAligned(address, alignment));
+    region_ = base::AddressRegion(address, size);
   }
 }
 
@@ -226,32 +242,31 @@ VirtualMemory::~VirtualMemory() {
 }
 
 void VirtualMemory::Reset() {
-  address_ = nullptr;
-  size_ = 0;
+  page_allocator_ = nullptr;
+  region_ = base::AddressRegion();
 }
 
-bool VirtualMemory::SetPermissions(void* address, size_t size,
+bool VirtualMemory::SetPermissions(Address address, size_t size,
                                    PageAllocator::Permission access) {
   CHECK(InVM(address, size));
-  bool result = v8::internal::SetPermissions(address, size, access);
+  bool result =
+      v8::internal::SetPermissions(page_allocator_, address, size, access);
   DCHECK(result);
-  USE(result);
   return result;
 }
 
-size_t VirtualMemory::Release(void* free_start) {
+size_t VirtualMemory::Release(Address free_start) {
   DCHECK(IsReserved());
-  DCHECK(IsAddressAligned(static_cast<Address>(free_start), CommitPageSize()));
+  DCHECK(IsAligned(free_start, page_allocator_->CommitPageSize()));
   // Notice: Order is important here. The VirtualMemory object might live
   // inside the allocated region.
-  const size_t free_size = size_ - (reinterpret_cast<size_t>(free_start) -
-                                    reinterpret_cast<size_t>(address_));
+
+  const size_t old_size = region_.size();
+  const size_t free_size = old_size - (free_start - region_.begin());
   CHECK(InVM(free_start, free_size));
-  DCHECK_LT(address_, free_start);
-  DCHECK_LT(free_start, reinterpret_cast<void*>(
-                            reinterpret_cast<size_t>(address_) + size_));
-  CHECK(ReleasePages(address_, size_, size_ - free_size));
-  size_ -= free_size;
+  region_.set_size(old_size - free_size);
+  CHECK(ReleasePages(page_allocator_, reinterpret_cast<void*>(region_.begin()),
+                     old_size, region_.size()));
   return free_size;
 }
 
@@ -259,39 +274,13 @@ void VirtualMemory::Free() {
   DCHECK(IsReserved());
   // Notice: Order is important here. The VirtualMemory object might live
   // inside the allocated region.
-  void* address = address_;
-  size_t size = size_;
-  CHECK(InVM(address, size));
+  v8::PageAllocator* page_allocator = page_allocator_;
+  base::AddressRegion region = region_;
   Reset();
-  // FreePages expects size to be aligned to allocation granularity. Trimming
-  // may leave size at only commit granularity. Align it here.
-  CHECK(FreePages(address, RoundUp(size, AllocatePageSize())));
-}
-
-void VirtualMemory::TakeControl(VirtualMemory* from) {
-  DCHECK(!IsReserved());
-  address_ = from->address_;
-  size_ = from->size_;
-  from->Reset();
-}
-
-bool AllocVirtualMemory(size_t size, void* hint, VirtualMemory* result) {
-  VirtualMemory vm(size, hint);
-  if (vm.IsReserved()) {
-    result->TakeControl(&vm);
-    return true;
-  }
-  return false;
-}
-
-bool AlignedAllocVirtualMemory(size_t size, size_t alignment, void* hint,
-                               VirtualMemory* result) {
-  VirtualMemory vm(size, hint, alignment);
-  if (vm.IsReserved()) {
-    result->TakeControl(&vm);
-    return true;
-  }
-  return false;
+  // FreePages expects size to be aligned to allocation granularity however
+  // ReleasePages may leave size at only commit granularity. Align it here.
+  CHECK(FreePages(page_allocator, reinterpret_cast<void*>(region.begin()),
+                  RoundUp(region.size(), page_allocator->AllocatePageSize())));
 }
 
 }  // namespace internal

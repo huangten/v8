@@ -31,7 +31,7 @@ bool InvalidatedSlotsFilter::IsValid(Address slot) {
       DCHECK_LE(invalidated_end_, iterator_->first->address());
       invalidated_start_ = iterator_->first->address();
       invalidated_end_ = invalidated_start_ + iterator_->second;
-      invalidated_object_ = nullptr;
+      invalidated_object_ = HeapObject();
       invalidated_object_size_ = 0;
     } else {
       invalidated_start_ = sentinel_;
@@ -45,8 +45,9 @@ bool InvalidatedSlotsFilter::IsValid(Address slot) {
   }
   // The invalidated region includes the slot.
   // Ask the object if the slot is valid.
-  if (invalidated_object_ == nullptr) {
+  if (invalidated_object_.is_null()) {
     invalidated_object_ = HeapObject::FromAddress(invalidated_start_);
+    DCHECK(!invalidated_object_->IsFiller());
     invalidated_object_size_ =
         invalidated_object_->SizeFromMap(invalidated_object_->map());
   }
@@ -56,12 +57,9 @@ bool InvalidatedSlotsFilter::IsValid(Address slot) {
             static_cast<int>(invalidated_end_ - invalidated_start_));
 
   if (offset >= invalidated_object_size_) {
-    // A new object could have been allocated during evacuation in the free
-    // space outside the object. Since objects are not invalidated in GC pause
-    // we can return true here.
-    return true;
+    return slots_in_free_space_are_valid_;
   }
-  return invalidated_object_->IsValidSlot(offset);
+  return invalidated_object_->IsValidSlot(invalidated_object_->map(), offset);
 }
 
 }  // namespace internal
